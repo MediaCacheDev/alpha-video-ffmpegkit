@@ -1,0 +1,49 @@
+{
+  "name": "react-native-webm-alpha-player-js",
+  "version": "1.0.0",
+  "description": "React Native WebM VP9+Alpha video player using Java/Swift with FFmpegKit",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "files": [
+    "src",
+    "android",
+    "ios",
+    "react-native.config.js",
+    "react-native-webm-alpha-player-js.podspec",
+    "README.md"
+  ],
+  "scripts": {
+    "build:ffmpeg:android": "./scripts/build-ffmpeg-android.sh",
+    "build:ffmpeg:ios": "./scripts/build-ffmpeg-ios.sh",
+    "build:ffmpeg": "npm run build:ffmpeg:android && npm run build:ffmpeg:ios",
+    "prepack": "echo 'Packing react-native-webm-alpha-player-js...'"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/danielkpl2/react-native-webm-alpha-player-js"
+  },
+  "keywords": [
+    "react-native",
+    "webm",
+    "vp9",
+    "alpha",
+    "video",
+    "transparent",
+    "ffmpeg",
+    "ffmpegkit"
+  ],
+  "author": "danielkpl2",
+  "license": "MIT",
+  "peerDependencies": {
+    "react": ">=17.0.0",
+    "react-native": ">=0.68.0"
+  },
+  "codegenConfig": {
+    "name": "RNWebMAlphaPlayerSpec",
+    "type": "components",
+    "jsSrcsDir": "src",
+    "android": {
+      "javaPackageName": "com.webmalphaplayer"
+    }
+  }
+}

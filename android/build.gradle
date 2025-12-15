@@ -1,0 +1,68 @@
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        classpath 'com.android.tools.build:gradle:7.4.2'
+    }
+}
+
+apply plugin: 'com.android.library'
+
+def safeExtGet(prop, fallback) {
+    rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+}
+
+android {
+    namespace "com.webmalphaplayer"
+    compileSdkVersion safeExtGet('compileSdkVersion', 34)
+    
+    defaultConfig {
+        minSdkVersion safeExtGet('minSdkVersion', 21)
+        targetSdkVersion safeExtGet('targetSdkVersion', 34)
+    }
+    
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+    
+    sourceSets {
+        main {
+            jniLibs.srcDirs = ['libs']
+        }
+    }
+    
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    
+    lintOptions {
+        abortOnError false
+    }
+}
+
+repositories {
+    google()
+    mavenCentral()
+    maven { url 'https://jitpack.io' }
+}
+
+dependencies {
+    implementation 'com.facebook.react:react-native:+'
+    
+    // FFmpegKit for VP9+alpha WebM playback
+    // Using local AAR built with our minimal VP9-only config (~30MB)
+    // Built with: ./scripts/build-ffmpeg-android.sh
+    implementation fileTree(dir: 'libs', include: ['*.aar'])
+    
+    // FFmpegKit's required runtime dependency (not bundled in AAR)
+    implementation 'com.arthenica:smart-exception-java:0.2.1'
+    
+    // Alternative: Use published 'full' variant from Maven (includes libvpx, ~40MB)
+    // implementation 'com.arthenica:ffmpeg-kit-full:6.0-2'
+}
