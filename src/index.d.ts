@@ -69,4 +69,9 @@ export const WebMAlphaCPUView: React.FC<Omit<WebMAlphaViewProps, 'useGPU'>>;
  */
 export const WebMAlphaGPUView: React.FC<Omit<WebMAlphaViewProps, 'useGPU'>>;
 
+/**
+ * @deprecated Use WebMAlphaGPUView instead. This alias is provided for backward compatibility.
+ */
+export const WebMAlphaMetalView: React.FC<Omit<WebMAlphaViewProps, 'useGPU'>>;
+
 export default WebMAlphaView;

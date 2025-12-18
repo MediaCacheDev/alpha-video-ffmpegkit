@@ -105,6 +105,7 @@ WebMAlphaCPUView.displayName = 'WebMAlphaCPUView';
  * GPU-accelerated WebM Alpha View
  * Uses OpenGL ES on Android and Metal on iOS for better performance
  */
+
 export const WebMAlphaGPUView = React.memo(({
   source,
   autoPlay = true,
@@ -136,6 +137,9 @@ export const WebMAlphaGPUView = React.memo(({
 });
 
 WebMAlphaGPUView.displayName = 'WebMAlphaGPUView';
+
+// Backward compatibility alias
+export const WebMAlphaMetalView = WebMAlphaGPUView;
 
 const styles = StyleSheet.create({
   container: {

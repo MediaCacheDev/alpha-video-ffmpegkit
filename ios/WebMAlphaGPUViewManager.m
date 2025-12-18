@@ -1,5 +1,5 @@
 //
-//  WebMAlphaGPUViewManager.m
+//  WebMAlphaMetalViewManager.m
 //  react-native-webm-alpha-player-java-swift
 //
 

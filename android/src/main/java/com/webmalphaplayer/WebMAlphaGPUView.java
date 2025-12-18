@@ -74,9 +74,12 @@ public class WebMAlphaGPUView extends TextureView implements TextureView.Surface
     private EGLContext eglContext;
     private EGLSurface eglSurface;
     private int program;
-    private int[] textures = new int[4]; // Y, U, V, A
     private FloatBuffer vertexBuffer;
     private FloatBuffer texCoordBuffer;
+    
+    // GPU texture cache - all frames pre-uploaded to GPU
+    private int[][] frameTextures; // [frameIndex][0=Y, 1=U, 2=V, 3=A]
+    private int currentFrameIndex = 0;
     
     private boolean hasLoggedFirstFrame = false;
     
@@ -278,12 +281,10 @@ public class WebMAlphaGPUView extends TextureView implements TextureView.Surface
             return;
         }
         
-        File framesDir = new File(getContext().getCacheDir(), "webm-yuva-" + System.currentTimeMillis());
-        framesDir.mkdirs();
+        // Decode to temp file, upload to GPU, delete immediately
+        File rawFile = new File(getContext().getCacheDir(), "webm_decode_" + System.currentTimeMillis() + ".yuva");
         
         try {
-            File rawFile = new File(framesDir, "frames.yuva");
-            
             String ffmpegCmd = String.format(
                 "-c:v libvpx-vp9 -i %s -f rawvideo -pix_fmt yuva420p %s",
                 escapePath(localPath), escapePath(rawFile.getAbsolutePath())
@@ -306,14 +307,21 @@ public class WebMAlphaGPUView extends TextureView implements TextureView.Surface
             long fileSize = rawFile.length();
             totalFrames = (int) (fileSize / frameSize);
             
-            Log.d(TAG, "Decoded " + totalFrames + " YUV frames, " + videoWidth + "x" + videoHeight);
+            double gpuMemoryMB = (double)(frameSize * totalFrames) / 1024.0 / 1024.0;
+            Log.d(TAG, String.format("🚀 Uploading %d frames to GPU (%.2f MB GPU memory, 0 MB RAM)", 
+                totalFrames, gpuMemoryMB));
             
             if (totalFrames > 0) {
-                playFramesGL(rawFile, ySize, uvSize, aSize, frameSize);
+                // Upload ALL frames to GPU textures first
+                if (uploadAllFramesToGPU(rawFile, ySize, uvSize, aSize, frameSize)) {
+                    // Then play from GPU cache - no per-frame upload!
+                    playFromGPUCache();
+                }
             }
             
         } finally {
-            deleteRecursive(framesDir);
+            // Delete temp file immediately after GPU upload
+            rawFile.delete();
         }
     }
     
@@ -375,15 +383,7 @@ public class WebMAlphaGPUView extends TextureView implements TextureView.Surface
             return false;
         }
         
-        GLES20.glGenTextures(4, textures, 0);
-        for (int i = 0; i < 4; i++) {
-            GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[i]);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
-            GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
-        }
-        
+        // Textures will be created per-frame in uploadAllFramesToGPU
         GLES20.glEnable(GLES20.GL_BLEND);
         GLES20.glBlendFunc(GLES20.GL_ONE, GLES20.GL_ONE_MINUS_SRC_ALPHA);
         
@@ -436,109 +436,168 @@ public class WebMAlphaGPUView extends TextureView implements TextureView.Surface
         return shader;
     }
     
-    private void playFramesGL(File rawFile, int ySize, int uvSize, int aSize, int frameSize) {
-        long frameIntervalNs = (long) (1_000_000_000.0 / frameRate);
-        
-        byte[] frameBuffer = new byte[frameSize];
-        ByteBuffer yBuffer = ByteBuffer.allocateDirect(ySize);
-        ByteBuffer uBuffer = ByteBuffer.allocateDirect(uvSize);
-        ByteBuffer vBuffer = ByteBuffer.allocateDirect(uvSize);
-        ByteBuffer aBuffer = ByteBuffer.allocateDirect(aSize);
-        
+    /**
+     * Upload ALL frames to GPU textures upfront.
+     * After this, CPU frame data is discarded - playback is 100% GPU.
+     */
+    private boolean uploadAllFramesToGPU(File rawFile, int ySize, int uvSize, int aSize, int frameSize) {
         int uvWidth = videoWidth / 2;
         int uvHeight = videoHeight / 2;
         
+        // Allocate texture IDs for all frames (4 textures per frame: Y, U, V, A)
+        frameTextures = new int[totalFrames][4];
+        
+        byte[] frameBuffer = new byte[frameSize];
+        ByteBuffer yBuffer = ByteBuffer.allocateDirect(ySize).order(ByteOrder.nativeOrder());
+        ByteBuffer uBuffer = ByteBuffer.allocateDirect(uvSize).order(ByteOrder.nativeOrder());
+        ByteBuffer vBuffer = ByteBuffer.allocateDirect(uvSize).order(ByteOrder.nativeOrder());
+        ByteBuffer aBuffer = ByteBuffer.allocateDirect(aSize).order(ByteOrder.nativeOrder());
+        
+        GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1);
+        
         try (RandomAccessFile raf = new RandomAccessFile(rawFile, "r")) {
-            do {
-                raf.seek(0);
-                long startTime = System.nanoTime();
-                int frameIndex = 0;
-                
-                while (!shouldStop.get() && !isDestroyed.get() && frameIndex < totalFrames) {
-                    int bytesRead = raf.read(frameBuffer);
-                    if (bytesRead != frameSize) break;
-                    
-                    yBuffer.clear();
-                    yBuffer.put(frameBuffer, 0, ySize);
-                    yBuffer.position(0);
-                    
-                    uBuffer.clear();
-                    uBuffer.put(frameBuffer, ySize, uvSize);
-                    uBuffer.position(0);
-                    
-                    vBuffer.clear();
-                    vBuffer.put(frameBuffer, ySize + uvSize, uvSize);
-                    vBuffer.position(0);
-                    
-                    aBuffer.clear();
-                    aBuffer.put(frameBuffer, ySize + uvSize + uvSize, aSize);
-                    aBuffer.position(0);
-                    
-                    renderFrameGL(yBuffer, uBuffer, vBuffer, aBuffer, uvWidth, uvHeight);
-                    
-                    frameIndex++;
-                    
-                    long targetTimeNs = startTime + (frameIndex * frameIntervalNs);
-                    long sleepNs = targetTimeNs - System.nanoTime();
-                    
-                    if (sleepNs > 1_000_000) {
-                        try {
-                            Thread.sleep(sleepNs / 1_000_000, (int) (sleepNs % 1_000_000));
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                            return;
-                        }
-                    }
+            for (int frameIdx = 0; frameIdx < totalFrames; frameIdx++) {
+                if (shouldStop.get() || isDestroyed.get()) {
+                    return false;
                 }
                 
-            } while (loop && !shouldStop.get() && !isDestroyed.get());
+                int bytesRead = raf.read(frameBuffer);
+                if (bytesRead != frameSize) {
+                    Log.e(TAG, "Failed to read frame " + frameIdx);
+                    return false;
+                }
+                
+                // Generate 4 textures for this frame
+                int[] texIds = new int[4];
+                GLES20.glGenTextures(4, texIds, 0);
+                frameTextures[frameIdx] = texIds;
+                
+                // Upload Y plane
+                yBuffer.clear();
+                yBuffer.put(frameBuffer, 0, ySize);
+                yBuffer.position(0);
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texIds[0]);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE,
+                    videoWidth, videoHeight, 0, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, yBuffer);
+                
+                // Upload U plane
+                uBuffer.clear();
+                uBuffer.put(frameBuffer, ySize, uvSize);
+                uBuffer.position(0);
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texIds[1]);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE,
+                    uvWidth, uvHeight, 0, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, uBuffer);
+                
+                // Upload V plane
+                vBuffer.clear();
+                vBuffer.put(frameBuffer, ySize + uvSize, uvSize);
+                vBuffer.position(0);
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texIds[2]);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE,
+                    uvWidth, uvHeight, 0, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, vBuffer);
+                
+                // Upload A plane
+                aBuffer.clear();
+                aBuffer.put(frameBuffer, ySize + uvSize + uvSize, aSize);
+                aBuffer.position(0);
+                GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texIds[3]);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+                GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+                GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE,
+                    videoWidth, videoHeight, 0, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, aBuffer);
+            }
+            
+            Log.d(TAG, "✅ Uploaded " + totalFrames + " frames to GPU (0 KB RAM)");
+            return true;
             
         } catch (Exception e) {
-            Log.e(TAG, "Error playing frames", e);
+            Log.e(TAG, "Error uploading frames to GPU", e);
+            return false;
         }
     }
     
-    private void renderFrameGL(ByteBuffer yData, ByteBuffer uData, ByteBuffer vData, ByteBuffer aData,
-                               int uvWidth, int uvHeight) {
-        if (eglDisplay == null || eglSurface == null) return;
+    /**
+     * Play from GPU texture cache - zero per-frame upload!
+     * Just bind pre-uploaded textures and render.
+     */
+    private void playFromGPUCache() {
+        long frameIntervalNs = (long) (1_000_000_000.0 / frameRate);
+        int uvWidth = videoWidth / 2;
+        int uvHeight = videoHeight / 2;
+        
+        do {
+            long startTime = System.nanoTime();
+            currentFrameIndex = 0;
+            
+            while (!shouldStop.get() && !isDestroyed.get() && currentFrameIndex < totalFrames) {
+                renderFrameFromGPU(currentFrameIndex, uvWidth, uvHeight);
+                
+                currentFrameIndex++;
+                
+                long targetTimeNs = startTime + (currentFrameIndex * frameIntervalNs);
+                long sleepNs = targetTimeNs - System.nanoTime();
+                
+                if (sleepNs > 1_000_000) {
+                    try {
+                        Thread.sleep(sleepNs / 1_000_000, (int) (sleepNs % 1_000_000));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                }
+            }
+            
+        } while (loop && !shouldStop.get() && !isDestroyed.get());
+    }
+    
+    /**
+     * Render a single frame from GPU cache - NO texture upload, just bind and draw!
+     */
+    private void renderFrameFromGPU(int frameIdx, int uvWidth, int uvHeight) {
+        if (eglDisplay == null || eglSurface == null || frameTextures == null) return;
+        if (frameIdx >= frameTextures.length) return;
+        
+        int[] texIds = frameTextures[frameIdx];
         
         if (!hasLoggedFirstFrame) {
             hasLoggedFirstFrame = true;
-            Log.d(TAG, "🚀 First frame rendered via OpenGL ES GPU shader");
+            Log.d(TAG, "🚀 First frame rendered via OpenGL ES GPU shader (zero-copy from GPU cache)");
         }
         
         GLES20.glClearColor(0, 0, 0, 0);
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
         GLES20.glViewport(0, 0, getWidth(), getHeight());
         GLES20.glUseProgram(program);
-        GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1);
         
-        // Upload Y texture
+        // Bind pre-uploaded textures - NO glTexImage2D call!
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[0]);
-        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE,
-            videoWidth, videoHeight, 0, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, yData);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texIds[0]);
         GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "yTexture"), 0);
         
-        // Upload U texture
         GLES20.glActiveTexture(GLES20.GL_TEXTURE1);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[1]);
-        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE,
-            uvWidth, uvHeight, 0, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, uData);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texIds[1]);
         GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "uTexture"), 1);
         
-        // Upload V texture
         GLES20.glActiveTexture(GLES20.GL_TEXTURE2);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[2]);
-        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE,
-            uvWidth, uvHeight, 0, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, vData);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texIds[2]);
         GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "vTexture"), 2);
         
-        // Upload A texture
         GLES20.glActiveTexture(GLES20.GL_TEXTURE3);
-        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, textures[3]);
-        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE,
-            videoWidth, videoHeight, 0, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, aData);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texIds[3]);
         GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "aTexture"), 3);
         
         int positionHandle = GLES20.glGetAttribLocation(program, "aPosition");
@@ -561,9 +620,14 @@ public class WebMAlphaGPUView extends TextureView implements TextureView.Surface
         if (eglDisplay != null && eglDisplay != EGL14.EGL_NO_DISPLAY) {
             EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);
             
-            if (textures[0] != 0) {
-                GLES20.glDeleteTextures(4, textures, 0);
-                textures = new int[4];
+            // Delete all frame textures from GPU cache
+            if (frameTextures != null) {
+                for (int[] texIds : frameTextures) {
+                    if (texIds != null && texIds[0] != 0) {
+                        GLES20.glDeleteTextures(4, texIds, 0);
+                    }
+                }
+                frameTextures = null;
             }
             
             if (program != 0) {

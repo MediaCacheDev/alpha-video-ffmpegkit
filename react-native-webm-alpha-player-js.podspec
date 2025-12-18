@@ -23,9 +23,9 @@ Pod::Spec.new do |s|
   # React Native source files
   s.source_files = [
     "ios/WebMAlphaCPUViewManager.{h,m,swift}",
-    "ios/WebMAlphaGPUViewManager.{h,m,swift}",
+    "ios/WebMAlphaGPUViewManager.{m,swift}",
     "ios/WebMAlphaCPUView.swift",
-    "ios/WebMAlphaMetalView.swift",
+    "ios/WebMAlphaGPUView.swift",
     "ios/WebMAlphaPlayer-Bridging-Header.h"
   ]
   s.swift_version = "5.0"

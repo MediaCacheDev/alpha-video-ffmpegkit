@@ -7,7 +7,7 @@ import Foundation
 class WebMAlphaGPUViewManager: RCTViewManager {
     
     override func view() -> UIView! {
-        return WebMAlphaMetalView()
+        return WebMAlphaGPUView()
     }
     
     override static func requiresMainQueueSetup() -> Bool {
