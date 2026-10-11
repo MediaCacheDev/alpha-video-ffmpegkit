@@ -1,5 +1,5 @@
 import type { ViewProps } from 'react-native';
-import codegenNativeComponent from 'react-native/Libraries/Utilities/codegenNativeComponent';
+import { requireNativeComponent } from 'react-native';
 import type { HostComponent } from 'react-native';
 
 export interface NativeProps extends ViewProps {
@@ -13,8 +13,6 @@ export interface NativeProps extends ViewProps {
   cacheKey?: string;
 }
 
-// codegenNativeComponent uses Fabric on New Architecture
-// and auto-falls back to requireNativeComponent on Legacy Architecture
-export default codegenNativeComponent<NativeProps>(
+export default requireNativeComponent<NativeProps>(
   'WebMAlphaCPUView'
 ) as HostComponent<NativeProps>;

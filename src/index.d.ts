@@ -31,6 +31,7 @@ export interface WebMAlphaViewProps {
   /**
    * Use GPU acceleration (OpenGL ES on Android, Metal on iOS)
    * GPU mode is faster but may have compatibility issues on some devices
+   * Ignored on web (uses HTML5 video element)
    * @default true
    */
   useGPU?: boolean;
@@ -40,6 +41,7 @@ export interface WebMAlphaViewProps {
    * If provided, downloaded WebM files will be saved to this path under the cache directory
    * Useful for controlling cache location and avoiding re-downloads
    * If not provided, files are cached using an auto-generated hash of the URL
+   * Ignored on web (browser handles caching)
    */
   cacheKey?: string;
 
@@ -47,6 +49,21 @@ export interface WebMAlphaViewProps {
    * View style
    */
   style?: StyleProp<ViewStyle>;
+
+  /**
+   * Callback when video is loaded and ready to play (web only)
+   */
+  onLoad?: () => void;
+
+  /**
+   * Callback when an error occurs (web only)
+   */
+  onError?: (error: Error) => void;
+
+  /**
+   * Callback when video playback ends (web only, non-looping)
+   */
+  onEnd?: () => void;
 }
 
 /**

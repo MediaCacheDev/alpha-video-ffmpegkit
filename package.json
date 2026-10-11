@@ -6,7 +6,8 @@
   "types": "src/index.d.ts",
   "files": [
     "src",
-    "android",
+    "android/src",
+    "android/build.gradle",
     "ios",
     "react-native.config.js",
     "react-native-webm-alpha-player-js.podspec",
@@ -37,13 +38,5 @@
   "peerDependencies": {
     "react": ">=17.0.0",
     "react-native": ">=0.68.0"
-  },
-  "codegenConfig": {
-    "name": "RNWebMAlphaPlayerSpec",
-    "type": "components",
-    "jsSrcsDir": "src",
-    "android": {
-      "javaPackageName": "com.webmalphaplayer"
-    }
   }
 }
