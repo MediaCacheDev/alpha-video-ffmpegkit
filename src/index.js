@@ -8,206 +8,109 @@ let WebMAlphaViewWeb;
 
 if (Platform.OS === 'web') {
   // Web implementation using HTML5 video element
-  const webModule = require('./WebMAlphaView.web');
-  WebMAlphaViewWeb = webModule.default;
+  WebMAlphaViewWeb = require('./WebMAlphaView.web').default;
 } else {
-  // Native implementation using codegenNativeComponent
-  // This supports both New Architecture (Fabric) and Legacy Architecture (auto-fallback)
   NativeWebMAlphaCPUView = require('./WebMAlphaCPUViewNativeComponent').default;
   NativeWebMAlphaGPUView = require('./WebMAlphaGPUViewNativeComponent').default;
 }
 
+function sourceUri(source) {
+  if (!source) return null;
+  if (typeof source === 'string') return source;
+  return source.uri || source.path || null;
+}
+
+function unwrap(handler) {
+  return handler ? (event) => handler(event.nativeEvent) : undefined;
+}
+
 /**
- * WebMAlphaView - React Native component for playing VP9+Alpha WebM files
- * 
- * Features:
- * - Supports WebM files with VP9 video codec and alpha channel
- * - Two rendering modes: CPU (simpler) and GPU (faster)
- * - GPU mode uses OpenGL ES on Android and Metal on iOS
- * - On web, uses native HTML5 video element (VP9+Alpha supported in Chrome/Firefox/Edge)
- * - Automatic URL downloading and caching
- * - Looping and pause controls
- * - Frame caching with cacheKey for repeated animations
- * 
- * @param {Object} props - Component props
- * @param {string} props.source - URL or local file path to the WebM file
- * @param {boolean} [props.autoPlay=true] - Start playing automatically
- * @param {boolean} [props.loop=true] - Loop the animation
- * @param {boolean} [props.paused=false] - Pause the animation
- * @param {boolean} [props.useGPU=true] - Use GPU acceleration (OpenGL ES/Metal) - ignored on web
- * @param {string} [props.cacheKey] - Cache key for downloaded files - ignored on web (browser handles caching)
- * @param {Object} [props.style] - View style
+ * Builds a player component. `pickNative(useGPU)` returns the native view to render.
+ *
+ * Props:
+ * - source: `{ uri, cacheKey? }` or a URI string. URIs: https://, http://, file://, an absolute
+ *   path, asset://relative/path, and on Android content:// or a res/raw resource name.
+ * - cacheKey: file name for the downloaded copy, relative to the cache directory. Overrides
+ *   source.cacheKey. Ignored on web.
+ * - autoPlay (true), loop (true), paused (false), verbose (false: only errors are logged)
+ * - onLoad({ totalFrames, width, height }), onError({ error }), onEnd({})
  */
-export const WebMAlphaView = React.memo(({
-  source,
-  autoPlay = true,
-  loop = true,
-  paused = false,
-  useGPU = true,
-  cacheKey,
-  style,
-  onLoad,
-  onError,
-  onEnd,
-  ...otherProps
-}) => {
-  // Web implementation
-  if (Platform.OS === 'web') {
+function createPlayer(displayName, pickNative) {
+  const Player = React.memo(({
+    source,
+    autoPlay = true,
+    loop = true,
+    paused = false,
+    useGPU = true,
+    cacheKey,
+    verbose = false,
+    style,
+    onLoad,
+    onError,
+    onEnd,
+    ...otherProps
+  }) => {
+    const uri = sourceUri(source);
+    const key = cacheKey ?? (typeof source === 'object' ? source?.cacheKey : undefined) ?? undefined;
+    const nativeSource = useMemo(
+      () => (uri ? (key ? { uri, cacheKey: key } : { uri }) : null),
+      [uri, key],
+    );
+
+    if (Platform.OS === 'web') {
+      return (
+        <WebMAlphaViewWeb
+          source={uri}
+          autoPlay={autoPlay}
+          loop={loop}
+          paused={paused}
+          style={style}
+          onLoad={onLoad}
+          onError={onError}
+          onEnd={onEnd}
+          {...otherProps}
+        />
+      );
+    }
+
+    if (!nativeSource) {
+      return <View style={style} />;
+    }
+
+    const NativeComponent = pickNative(useGPU);
     return (
-      <WebMAlphaViewWeb
-        source={source}
+      <NativeComponent
+        source={nativeSource}
+        cacheKey={key}
         autoPlay={autoPlay}
         loop={loop}
         paused={paused}
-        style={style}
-        onLoad={onLoad}
-        onError={onError}
-        onEnd={onEnd}
+        verbose={verbose}
+        onLoad={unwrap(onLoad)}
+        onError={unwrap(onError)}
+        onEnd={unwrap(onEnd)}
+        style={[styles.container, style]}
         {...otherProps}
       />
     );
-  }
-
-  // Native implementation - choose the appropriate native component
-  const NativeComponent = useGPU ? NativeWebMAlphaGPUView : NativeWebMAlphaCPUView;
-
-  // Memoize props to prevent unnecessary re-renders
-  const nativeProps = useMemo(() => ({
-    source,
-    autoPlay,
-    loop,
-    paused,
-    cacheKey,
-  }), [source, autoPlay, loop, paused, cacheKey]);
-
-  if (!source) {
-    return <View style={style} />;
-  }
-
-  return (
-    <NativeComponent
-      {...nativeProps}
-      style={[styles.container, style]}
-      {...otherProps}
-    />
-  );
-});
-
-WebMAlphaView.displayName = 'WebMAlphaView';
+  });
+  Player.displayName = displayName;
+  return Player;
+}
 
 /**
- * CPU-only WebM Alpha View
- * Use this if you're experiencing GPU issues or want simpler rendering
- * On web, uses HTML5 video element (same as GPU view)
+ * VP9+Alpha WebM player. `useGPU` (default true) picks OpenGL ES / Metal rendering over
+ * Bitmap / UIImage rendering. On web this is an HTML5 <video>.
  */
-export const WebMAlphaCPUView = React.memo(({
-  source,
-  autoPlay = true,
-  loop = true,
-  paused = false,
-  cacheKey,
-  style,
-  onLoad,
-  onError,
-  onEnd,
-  ...otherProps
-}) => {
-  // Web implementation
-  if (Platform.OS === 'web') {
-    return (
-      <WebMAlphaViewWeb
-        source={source}
-        autoPlay={autoPlay}
-        loop={loop}
-        paused={paused}
-        style={style}
-        onLoad={onLoad}
-        onError={onError}
-        onEnd={onEnd}
-        {...otherProps}
-      />
-    );
-  }
+export const WebMAlphaView = createPlayer('WebMAlphaView', (useGPU) =>
+  useGPU ? NativeWebMAlphaGPUView : NativeWebMAlphaCPUView,
+);
 
-  const nativeProps = useMemo(() => ({
-    source,
-    autoPlay,
-    loop,
-    paused,
-    cacheKey,
-  }), [source, autoPlay, loop, paused, cacheKey]);
+/** CPU rendering (Bitmap on Android, UIImage on iOS). */
+export const WebMAlphaCPUView = createPlayer('WebMAlphaCPUView', () => NativeWebMAlphaCPUView);
 
-  if (!source) {
-    return <View style={style} />;
-  }
-
-  return (
-    <NativeWebMAlphaCPUView
-      {...nativeProps}
-      style={[styles.container, style]}
-      {...otherProps}
-    />
-  );
-});
-
-WebMAlphaCPUView.displayName = 'WebMAlphaCPUView';
-
-/**
- * GPU-accelerated WebM Alpha View
- * Uses OpenGL ES on Android and Metal on iOS for better performance
- * On web, uses HTML5 video element (same as CPU view)
- */
-export const WebMAlphaGPUView = React.memo(({
-  source,
-  autoPlay = true,
-  loop = true,
-  paused = false,
-  cacheKey,
-  style,
-  onLoad,
-  onError,
-  onEnd,
-  ...otherProps
-}) => {
-  // Web implementation
-  if (Platform.OS === 'web') {
-    return (
-      <WebMAlphaViewWeb
-        source={source}
-        autoPlay={autoPlay}
-        loop={loop}
-        paused={paused}
-        style={style}
-        onLoad={onLoad}
-        onError={onError}
-        onEnd={onEnd}
-        {...otherProps}
-      />
-    );
-  }
-
-  const nativeProps = useMemo(() => ({
-    source,
-    autoPlay,
-    loop,
-    paused,
-    cacheKey,
-  }), [source, autoPlay, loop, paused, cacheKey]);
-
-  if (!source) {
-    return <View style={style} />;
-  }
-
-  return (
-    <NativeWebMAlphaGPUView
-      {...nativeProps}
-      style={[styles.container, style]}
-      {...otherProps}
-    />
-  );
-});
-
-WebMAlphaGPUView.displayName = 'WebMAlphaGPUView';
+/** GPU rendering (OpenGL ES on Android, Metal on iOS). */
+export const WebMAlphaGPUView = createPlayer('WebMAlphaGPUView', () => NativeWebMAlphaGPUView);
 
 // Backward compatibility alias
 export const WebMAlphaMetalView = WebMAlphaGPUView;

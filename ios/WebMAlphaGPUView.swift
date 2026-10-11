@@ -24,7 +24,7 @@ private func initializeMetalResources() -> Bool {
     metalInitialized = true
 
     guard let device = MTLCreateSystemDefaultDevice() else {
-        print("[WebMAlphaMetalView] Metal not available on this device")
+        NSLog("[WebMAlphaGPUView] Metal not available on this device")
         return false
     }
     sharedMetalDevice = device
@@ -101,10 +101,9 @@ private func initializeMetalResources() -> Bool {
         pipelineDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
 
         sharedPipelineState = try device.makeRenderPipelineState(descriptor: pipelineDescriptor)
-        print("[WebMAlphaMetalView] Metal pipeline initialized successfully")
         return true
     } catch {
-        print("[WebMAlphaMetalView] Failed to create Metal pipeline: \(error)")
+        NSLog("[WebMAlphaGPUView] Failed to create Metal pipeline: %@", "\(error)")
         return false
     }
 }
@@ -160,17 +159,17 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
     @objc public var autoPlay: Bool = true
     @objc public var loop: Bool = true
     @objc public var cacheKey: String?
-    
-    // Expose paused to React Native
-    @objc public var paused: Bool = false {
-        didSet {
-            print("[WebMAlphaMetalView] Paused state changed to: \(paused)")
-        }
-    }
+    @objc public var paused: Bool = false
+    @objc public var verbose: Bool = false
+    @objc public var onLoad: (([AnyHashable: Any]) -> Void)?
+    @objc public var onError: (([AnyHashable: Any]) -> Void)?
+    @objc public var onEnd: (([AnyHashable: Any]) -> Void)?
 
     private var isPlaying = false
     private var isDecoding = false
     private var shouldStop = false
+    /// Bumped by every play(), so a decode left over from an earlier source can't take over.
+    private var generation = 0
 
     // CADisplayLink for frame-synchronized rendering
     private var displayLink: CADisplayLink?
@@ -187,7 +186,6 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
     private var videoHeight: Int = 0
 
     private let decodeQueue = DispatchQueue(label: "com.webmalphaplayer.metal.decode", qos: .userInitiated)
-    private var hasLoggedFirstFrame = false
 
     // MARK: - Initialization
 
@@ -208,7 +206,6 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
 
         // Initialize Metal resources if not already done
         if !initializeMetalResources() {
-            print("[WebMAlphaMetalView] Failed to initialize Metal resources")
             return
         }
 
@@ -247,17 +244,20 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
 
     // MARK: - Public API
 
-    @objc public func setSource(_ sourceDict: NSDictionary) {
-        guard let uri = sourceDict["uri"] as? String else {
-            print("[WebMAlphaMetalView] Invalid source: missing 'uri'")
+    @objc public func setSource(_ sourceDict: NSDictionary?) {
+        stop()
+        guard let uri = sourceDict?["uri"] as? String, !uri.isEmpty else {
+            source = nil
+            sourceHash = nil
             return
         }
-
-        // Stop current playback
-        stop()
+        if let key = sourceDict?["cacheKey"] as? String, !key.isEmpty {
+            cacheKey = key
+        }
 
         source = uri
-        sourceHash = String(uri.hashValue)
+        // Textures are shared between views showing the same clip.
+        sourceHash = WebMSourceResolver.identity(for: uri, cacheKey: cacheKey)
 
         if autoPlay {
             play()
@@ -265,37 +265,59 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
     }
 
     @objc public func play() {
-        guard !isPlaying, let source = source, let hash = sourceHash else { 
-            print("[WebMAlphaMetalView] Cannot play: isPlaying=\(isPlaying), source=\(source ?? "nil"), hash=\(sourceHash ?? "nil")")
-            return 
-        }
+        guard !isPlaying, !isDecoding, let source = source, let hash = sourceHash else { return }
 
         shouldStop = false
-        paused = false
-        
-        print("[WebMAlphaMetalView] Starting playback for source: \(source)")
+        generation += 1
+        let gen = generation
+        let key = cacheKey
 
         // Check GPU texture cache first - instant playback if cached
         if let cachedTextures = gpuTextureCache.object(forKey: hash as NSString) {
-            print("[WebMAlphaMetalView] ⚡ Using GPU-cached textures: \(cachedTextures.frameCount) frames, \(cachedTextures.gpuMemoryBytes / 1024)KB GPU memory")
-            self.currentTextureCache = cachedTextures
-            self.frameRate = cachedTextures.frameRate
-            self.frameInterval = 1.0 / frameRate
-            self.currentFrameIndex = 0
-            self.isPlaying = true
-            startDisplayLink()
+            log("Using GPU-cached textures: \(cachedTextures.frameCount) frames, \(cachedTextures.gpuMemoryBytes / 1024)KB")
+            startPlaying(cachedTextures)
             return
         }
 
-        // Decode in background
         isDecoding = true
         decodeQueue.async { [weak self] in
-            self?.decodeAndCache(source: source, hash: hash)
+            guard let self = self, !self.isStopped(gen) else { return }
+            do {
+                let textures = try self.decodeToTextures(source: source, cacheKey: key, gen: gen)
+                gpuTextureCache.setObject(textures, forKey: hash as NSString)
+                DispatchQueue.main.async {
+                    guard !self.isStopped(gen) else { return }
+                    self.isDecoding = false
+                    self.startPlaying(textures)
+                }
+            } catch {
+                guard !self.isStopped(gen) else { return }
+                let message = "Failed to play \(source): \(error.localizedDescription)"
+                NSLog("[WebMAlphaGPUView] %@", message)
+                DispatchQueue.main.async {
+                    guard !self.isStopped(gen) else { return }
+                    self.isDecoding = false
+                    self.onError?(["error": message])
+                }
+            }
         }
     }
 
+    private func startPlaying(_ textures: GPUTextureCache) {
+        currentTextureCache = textures
+        frameRate = textures.frameRate
+        frameInterval = 1.0 / frameRate
+        currentFrameIndex = 0
+        isPlaying = true
+        onLoad?(["totalFrames": textures.frameCount, "width": textures.width, "height": textures.height])
+        startDisplayLink()
+    }
+
+    private func isStopped(_ gen: Int) -> Bool {
+        return shouldStop || gen != generation
+    }
+
     @objc public func stop() {
-        print("[WebMAlphaMetalView] Stopping playback")
         shouldStop = true
         isPlaying = false
         isDecoding = false
@@ -311,7 +333,6 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
         displayLink?.add(to: .main, forMode: .common)
         lastFrameTime = CACurrentMediaTime()
         frameInterval = 1.0 / frameRate
-        print("[WebMAlphaMetalView] CADisplayLink started at \(frameRate)fps")
     }
     
     private func stopDisplayLink() {
@@ -344,7 +365,7 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
                 } else {
                     isPlaying = false
                     stopDisplayLink()
-                    print("[WebMAlphaMetalView] Playback complete")
+                    onEnd?([:])
                 }
             }
         }
@@ -352,40 +373,32 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
 
     // MARK: - Decoding
 
-    private func decodeAndCache(source: String, hash: String) {
+    private func decodeToTextures(source: String, cacheKey: String?, gen: Int) throws -> GPUTextureCache {
         guard let device = sharedMetalDevice else {
-            print("[WebMAlphaMetalView] No Metal device")
-            return
+            throw WebMSourceError(message: "Metal is not available")
         }
-        
-        guard let filePath = downloadToCache(urlString: source) else {
-            print("[WebMAlphaMetalView] Failed to download: \(source)")
-            return
+
+        let filePath = try WebMSourceResolver.localPath(for: source, cacheKey: cacheKey) { [weak self] in
+            self?.isStopped(gen) ?? true
         }
 
         guard probeVideo(path: filePath) else {
-            print("[WebMAlphaMetalView] Failed to probe video")
-            return
+            throw WebMSourceError(message: "Could not read video size and frame rate")
         }
+        log("Decoding: \(videoWidth)x\(videoHeight) @ \(frameRate)fps")
 
-        print("[WebMAlphaMetalView] Decoding: \(videoWidth)x\(videoHeight) @ \(frameRate)fps")
-
-        // Decode with FFmpeg - output to pipe (no disk I/O)
-        // We still need a temp file because FFmpegKit doesn't support pipe output well
-        // But we'll read and upload to GPU immediately, then delete
+        // FFmpegKit can't pipe raw output, so frames go through a temp file and onto the GPU.
         let rawFile = NSTemporaryDirectory() + "webm_decode_\(UUID().uuidString).yuva"
+        defer { try? FileManager.default.removeItem(atPath: rawFile) }
 
         // CRITICAL: Use libvpx-vp9 codec for proper VP9 alpha decoding
         let command = "-c:v libvpx-vp9 -i \"\(filePath)\" -f rawvideo -pix_fmt yuva420p \"\(rawFile)\""
-
-        guard let session = FFmpegKit.execute(command),
-              ReturnCode.isSuccess(session.getReturnCode()) else {
-            print("[WebMAlphaMetalView] FFmpeg decode failed")
-            if let session = FFmpegKit.execute(command) {
-                print("[WebMAlphaMetalView] FFmpeg output: \(session.getOutput() ?? "none")")
-            }
-            try? FileManager.default.removeItem(atPath: rawFile)
-            return
+        guard let session = FFmpegKit.execute(command) else {
+            throw WebMSourceError(message: "FFmpeg did not start")
+        }
+        guard ReturnCode.isSuccess(session.getReturnCode()) else {
+            let output = session.getOutput() ?? ""
+            throw WebMSourceError(message: "FFmpeg decode failed: \(output.suffix(600))")
         }
 
         // Calculate frame sizes for yuva420p
@@ -396,35 +409,14 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
         let uvWidth = videoWidth / 2
         let uvHeight = videoHeight / 2
 
-        guard let fileSize = try? FileManager.default.attributesOfItem(atPath: rawFile)[.size] as? Int,
-              fileSize > 0 else {
-            print("[WebMAlphaMetalView] Failed to get raw file size")
-            try? FileManager.default.removeItem(atPath: rawFile)
-            return
-        }
-
+        let fileSize = (try? FileManager.default.attributesOfItem(atPath: rawFile)[.size] as? Int) ?? 0
         let totalFrames = fileSize / frameSize
-        let gpuMemoryMB = Double(frameSize * totalFrames) / 1024.0 / 1024.0
+        log("Uploading \(totalFrames) frames, \(String(format: "%.2f", Double(frameSize * totalFrames) / 1024.0 / 1024.0)) MB GPU memory")
 
-        print("""
-        [WebMAlphaMetalView] 🚀 Uploading directly to GPU
-        - Resolution: \(videoWidth)x\(videoHeight)
-        - Total frames: \(totalFrames)
-        - GPU memory: \(String(format: "%.2f", gpuMemoryMB)) MB
-        - RAM usage: ~0 MB (frames go straight to GPU)
-        """)
-
-        guard totalFrames > 0, !shouldStop else {
-            print("[WebMAlphaMetalView] No frames decoded or stopped")
-            try? FileManager.default.removeItem(atPath: rawFile)
-            return
+        guard totalFrames > 0, let fileHandle = FileHandle(forReadingAtPath: rawFile) else {
+            throw WebMSourceError(message: "No frames decoded")
         }
-
-        guard let fileHandle = FileHandle(forReadingAtPath: rawFile) else {
-            print("[WebMAlphaMetalView] Failed to open raw file")
-            try? FileManager.default.removeItem(atPath: rawFile)
-            return
-        }
+        defer { try? fileHandle.close() }
 
         // Create GPU textures for ALL frames upfront
         var yTextures: [MTLTexture] = []
@@ -438,8 +430,8 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
         aTextures.reserveCapacity(totalFrames)
 
         // Read each frame and upload directly to GPU texture
-        for frameIdx in 0..<totalFrames {
-            guard !shouldStop else { break }
+        for _ in 0..<totalFrames {
+            guard !isStopped(gen) else { break }
 
             autoreleasepool {
                 guard let frameData = try? fileHandle.read(upToCount: frameSize),
@@ -447,12 +439,10 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
                     return
                 }
 
-                // Create textures for this frame
                 guard let yTex = createTexture(device: device, width: videoWidth, height: videoHeight),
                       let uTex = createTexture(device: device, width: uvWidth, height: uvHeight),
                       let vTex = createTexture(device: device, width: uvWidth, height: uvHeight),
                       let aTex = createTexture(device: device, width: videoWidth, height: videoHeight) else {
-                    print("[WebMAlphaMetalView] Failed to create textures for frame \(frameIdx)")
                     return
                 }
 
@@ -494,19 +484,14 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
                 vTextures.append(vTex)
                 aTextures.append(aTex)
             }
-            // frameData is released here - no CPU memory retained!
         }
 
-        try? fileHandle.close()
-        try? FileManager.default.removeItem(atPath: rawFile)  // Delete temp file immediately
-
-        guard yTextures.count == totalFrames, !shouldStop else {
-            print("[WebMAlphaMetalView] Failed to upload all frames or stopped")
-            return
+        guard !isStopped(gen) else { throw WebMSourceError(message: "Stopped") }
+        guard yTextures.count == totalFrames else {
+            throw WebMSourceError(message: "Uploaded \(yTextures.count) of \(totalFrames) frames")
         }
 
-        // Create GPU texture cache
-        let textureCache = GPUTextureCache(
+        return GPUTextureCache(
             yTextures: yTextures,
             uTextures: uTextures,
             vTextures: vTextures,
@@ -515,24 +500,6 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
             height: videoHeight,
             frameRate: frameRate
         )
-        
-        // Store in global cache for reuse
-        gpuTextureCache.setObject(textureCache, forKey: hash as NSString)
-        
-        print("[WebMAlphaMetalView] ✅ Uploaded \(totalFrames) frames to GPU (\(textureCache.gpuMemoryBytes / 1024)KB GPU memory, 0KB RAM)")
-
-        // Start playback on main thread
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self, !self.shouldStop else { return }
-            self.currentTextureCache = textureCache
-            self.frameRate = textureCache.frameRate
-            self.frameInterval = 1.0 / self.frameRate
-            self.currentFrameIndex = 0
-            self.isPlaying = true
-            self.isDecoding = false
-            print("[WebMAlphaMetalView] 🎬 Starting GPU-only playback with \(totalFrames) frames")
-            self.startDisplayLink()
-        }
     }
 
     // MARK: - Metal Texture Creation
@@ -568,12 +535,6 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
         let uTex = cache.uTextures[currentFrameIndex]
         let vTex = cache.vTextures[currentFrameIndex]
         let aTex = cache.aTextures[currentFrameIndex]
-
-        // Log first successful Metal render
-        if !hasLoggedFirstFrame {
-            hasLoggedFirstFrame = true
-            print("[WebMAlphaMetalView] 🚀 First frame rendered via Metal GPU shader (zero-copy from GPU cache)")
-        }
 
         renderPassDescriptor.colorAttachments[0].loadAction = .clear
         renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
@@ -618,7 +579,6 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
                     frameRate = frameRateVal
                 }
 
-                print("[WebMAlphaMetalView] Probed video: \(videoWidth)x\(videoHeight) @ \(frameRate)fps")
                 return videoWidth > 0 && videoHeight > 0
             }
         }
@@ -632,70 +592,8 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
         return components[0] / components[1]
     }
 
-    // MARK: - File Handling
-
-    private func downloadToCache(urlString: String) -> String? {
-        guard let url = URL(string: urlString) else {
-            print("[WebMAlphaMetalView] Invalid URL: \(urlString)")
-            return nil
-        }
-        
-        guard let data = try? Data(contentsOf: url) else {
-            print("[WebMAlphaMetalView] Failed to download from: \(urlString)")
-            return nil
-        }
-
-        // Generate cache path
-        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-        
-        let cacheFile: URL
-        if let cacheKey = cacheKey {
-            // cacheKey represents the full path from cache directory
-            let pathComponents = cacheKey.split(separator: "/").map { String($0) }
-            var currentDir = cacheDir
-            
-            // Create intermediate directories (all parts except the last)
-            for component in pathComponents.dropLast() {
-                currentDir = currentDir.appendingPathComponent(component)
-            }
-            
-            try? FileManager.default.createDirectory(at: currentDir, withIntermediateDirectories: true)
-            
-            let fileName = pathComponents.last ?? "unknown"
-            cacheFile = currentDir.appendingPathComponent(fileName)
-        } else {
-            // For hash-based caching, use webm-cache subdirectory
-            let webmCacheDir = cacheDir.appendingPathComponent("webm-cache")
-            try? FileManager.default.createDirectory(at: webmCacheDir, withIntermediateDirectories: true)
-            
-            let pathOnly = url.path
-            
-            // Use djb2 hash of the path to ensure unique cache files per video
-            var hashValue: UInt64 = 5381
-            for char in pathOnly.utf8 {
-                hashValue = ((hashValue << 5) &+ hashValue) &+ UInt64(char)
-            }
-            let cacheFileName = String(format: "%016llx.webm", hashValue)
-            cacheFile = webmCacheDir.appendingPathComponent(cacheFileName)
-        }
-        
-        print("[WebMAlphaMetalView] Cache key for '\(url.path)' -> \(cacheFile.path)")
-        
-        // Check cache
-        if FileManager.default.fileExists(atPath: cacheFile.path) {
-            print("[WebMAlphaMetalView] Using cached: \(cacheFile.path)")
-            return cacheFile.path
-        }
-        
-        // Download and cache
-        do {
-            try data.write(to: cacheFile)
-            print("[WebMAlphaMetalView] Downloaded and cached: \(cacheFile.path)")
-            return cacheFile.path
-        } catch {
-            print("[WebMAlphaMetalView] Failed to save downloaded file: \(error)")
-            return nil
-        }
+    private func log(_ message: @autoclosure () -> String) {
+        if verbose { NSLog("[WebMAlphaGPUView] %@", message()) }
     }
 
     private func executeFFprobe(command: String) -> String? {

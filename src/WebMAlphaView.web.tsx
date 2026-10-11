@@ -10,7 +10,9 @@ import { View, StyleSheet, Platform } from 'react-native';
 
 export interface SourceType {
   uri?: string;
+  /** @deprecated use uri */
   path?: string;
+  cacheKey?: string;
 }
 
 export interface WebMAlphaViewWebProps {
@@ -20,10 +22,16 @@ export interface WebMAlphaViewWebProps {
   paused?: boolean;
   useGPU?: boolean; // Ignored on web, kept for API compatibility
   cacheKey?: string; // Ignored on web, browser handles caching
+  verbose?: boolean; // Ignored on web
   style?: any;
-  onLoad?: () => void;
-  onError?: (error: Error) => void;
-  onEnd?: () => void;
+  onLoad?: (event: { totalFrames: number; width: number; height: number }) => void;
+  onError?: (event: { error: string }) => void;
+  onEnd?: (event: {}) => void;
+}
+
+/** asset://path is served from the site root, like files bundled with a native app. */
+function resolveWebUri(uri: string): string {
+  return uri.startsWith('asset://') ? '/' + uri.slice('asset://'.length).replace(/^\/+/, '') : uri;
 }
 
 export const WebMAlphaViewWeb: React.FC<WebMAlphaViewWebProps> = ({
@@ -41,27 +49,32 @@ export const WebMAlphaViewWeb: React.FC<WebMAlphaViewWebProps> = ({
 
   // Normalize source to get URI
   const videoSrc = useMemo(() => {
-    if (!source) return null;
-    if (typeof source === 'string') return source;
-    return source.uri || source.path || null;
+    const uri = typeof source === 'string' ? source : source?.uri || source?.path;
+    return uri ? resolveWebUri(uri) : null;
   }, [source]);
 
   // Handle video loaded
-  const handleLoadedData = useCallback(() => {
+  const handleLoadedData = useCallback((e: React.SyntheticEvent<HTMLVideoElement, Event>) => {
+    const video = e.currentTarget;
     setIsReady(true);
-    onLoad?.();
+    // The browser doesn't expose a frame count; this assumes 30 fps.
+    onLoad?.({
+      totalFrames: Math.floor(video.duration * 30),
+      width: video.videoWidth,
+      height: video.videoHeight,
+    });
   }, [onLoad]);
 
   // Handle video error
   const handleError = useCallback((e: React.SyntheticEvent<HTMLVideoElement, Event>) => {
     const video = e.currentTarget;
     const error = video.error;
-    onError?.(new Error(error?.message || 'Video playback error'));
+    onError?.({ error: error?.message || 'Video playback error' });
   }, [onError]);
 
   // Handle video ended
   const handleEnded = useCallback(() => {
-    onEnd?.();
+    onEnd?.({});
   }, [onEnd]);
 
   // Handle autoPlay

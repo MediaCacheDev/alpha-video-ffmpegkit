@@ -1,14 +1,33 @@
 import { ViewStyle, StyleProp } from 'react-native';
 
-export interface WebMAlphaViewProps {
+export interface WebMAlphaSource {
   /**
-   * URL or local file path to the WebM file with VP9+Alpha
-   * Supports: http://, https://, file://
+   * Where the WebM (VP9 + alpha) comes from:
+   * - `https://…`, `http://…`: downloaded once into the app cache (see `cacheKey`)
+   * - `file:///abs/path` or `/abs/path`: a local file, used in place
+   * - `asset://relative/path`: Android APK assets, the iOS app bundle, or the site root on web
+   * - Android only: `content://…`, or a bare `res/raw` resource name such as `"intro"`
    */
-  source: {
-    uri?: string;
-    path?: string;
-  };
+  uri: string;
+  /** @deprecated use `uri` */
+  path?: string;
+  /** Same as the `cacheKey` prop; the prop wins if both are set. */
+  cacheKey?: string;
+}
+
+export interface WebMAlphaLoadEvent {
+  totalFrames: number;
+  width: number;
+  height: number;
+}
+
+export interface WebMAlphaErrorEvent {
+  error: string;
+}
+
+export interface WebMAlphaViewProps {
+  /** A `WebMAlphaSource` or just its `uri`. */
+  source: WebMAlphaSource | string | null | undefined;
 
   /**
    * Start playing automatically when source is set
@@ -30,40 +49,39 @@ export interface WebMAlphaViewProps {
 
   /**
    * Use GPU acceleration (OpenGL ES on Android, Metal on iOS)
-   * GPU mode is faster but may have compatibility issues on some devices
    * Ignored on web (uses HTML5 video element)
    * @default true
    */
   useGPU?: boolean;
 
   /**
-   * Cache key for storing downloaded files
-   * If provided, downloaded WebM files will be saved to this path under the cache directory
-   * Useful for controlling cache location and avoiding re-downloads
-   * If not provided, files are cached using an auto-generated hash of the URL
+   * File name for the downloaded copy of an http(s) source, relative to the app's cache
+   * directory (e.g. `"animations/intro.webm"`); it must stay inside that directory. Without
+   * one the file is named from a SHA-256 of the URL, so a URL that changes (presigned links)
+   * downloads again. Also names the decoded-frame cache on iOS.
    * Ignored on web (browser handles caching)
    */
   cacheKey?: string;
+
+  /**
+   * Log progress to logcat / the iOS console. Errors are always logged.
+   * @default false
+   */
+  verbose?: boolean;
 
   /**
    * View style
    */
   style?: StyleProp<ViewStyle>;
 
-  /**
-   * Callback when video is loaded and ready to play (web only)
-   */
-  onLoad?: () => void;
+  /** All frames are decoded and playback is starting. On web, totalFrames assumes 30 fps. */
+  onLoad?: (event: WebMAlphaLoadEvent) => void;
 
-  /**
-   * Callback when an error occurs (web only)
-   */
-  onError?: (error: Error) => void;
+  /** The source could not be resolved, downloaded or decoded. */
+  onError?: (event: WebMAlphaErrorEvent) => void;
 
-  /**
-   * Callback when video playback ends (web only, non-looping)
-   */
-  onEnd?: () => void;
+  /** A non-looping clip played to the end. */
+  onEnd?: (event: {}) => void;
 }
 
 /**

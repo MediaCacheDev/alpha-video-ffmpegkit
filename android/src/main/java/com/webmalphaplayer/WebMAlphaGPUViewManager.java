@@ -1,7 +1,5 @@
 package com.webmalphaplayer;
 
-import android.util.Log;
-
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
@@ -11,30 +9,18 @@ import com.facebook.react.uimanager.SimpleViewManager;
 import com.facebook.react.uimanager.ThemedReactContext;
 import com.facebook.react.uimanager.annotations.ReactProp;
 
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.Map;
 
 /**
- * View Manager for the GPU-accelerated WebM Alpha Player (OpenGL ES)
- * 
- * Supports multiple source formats:
- * - HTTP/HTTPS URLs: Downloaded and cached
- * - file:// URIs: Local file paths
- * - asset:// URIs: Android assets
- * - Plain paths: Direct file paths
+ * View Manager for the GPU-accelerated WebM Alpha Player (OpenGL ES).
+ *
+ * Props are passed straight to the view, which resolves the source itself (see {@link WebMSource}).
+ * Events: onLoad, onError, onEnd.
  */
 public class WebMAlphaGPUViewManager extends SimpleViewManager<WebMAlphaGPUView> {
-    private static final String TAG = "WebMAlphaGPUViewMgr";
     public static final String REACT_CLASS = "WebMAlphaGPUView";
     
-    private final ReactApplicationContext reactContext;
-    private final ExecutorService assetExecutor = Executors.newFixedThreadPool(2);
-    
     public WebMAlphaGPUViewManager(ReactApplicationContext reactContext) {
-        this.reactContext = reactContext;
     }
     
     @NonNull
@@ -46,84 +32,23 @@ public class WebMAlphaGPUViewManager extends SimpleViewManager<WebMAlphaGPUView>
     @NonNull
     @Override
     protected WebMAlphaGPUView createViewInstance(@NonNull ThemedReactContext context) {
-        return new WebMAlphaGPUView(context);
+        WebMAlphaGPUView view = new WebMAlphaGPUView(context);
+        view.setCallback(new PlayerEventForwarder(view));
+        return view;
     }
     
-    /**
-     * Accept source as { uri: string } or { path: string }
-     * Handles multiple URI schemes: http(s)://, file://, asset://, or plain paths
-     */
+    /** {@code { uri, cacheKey? }}; a cacheKey here is the same as the cacheKey prop. */
     @ReactProp(name = "source")
     public void setSource(WebMAlphaGPUView view, @Nullable ReadableMap source) {
-        String sourceUri = null;
-        if (source != null) {
-            if (source.hasKey("uri") && !source.isNull("uri")) {
-                sourceUri = source.getString("uri");
-            } else if (source.hasKey("path") && !source.isNull("path")) {
-                sourceUri = source.getString("path");
-            }
+        String uri = source != null && source.hasKey("uri") && !source.isNull("uri") ? source.getString("uri") : null;
+        if (source != null && source.hasKey("cacheKey") && !source.isNull("cacheKey")) {
+            view.setCacheKey(source.getString("cacheKey"));
         }
-        
-        if (sourceUri == null || sourceUri.isEmpty()) {
-            Log.d(TAG, "setSource: null or empty");
-            view.setSource(null);
-            return;
-        }
-        
-        Log.d(TAG, "setSource: " + sourceUri.substring(0, Math.min(80, sourceUri.length())) + "...");
-        
-        // Handle different URI schemes like the C++ version
-        if (sourceUri.startsWith("http://") || sourceUri.startsWith("https://")) {
-            // HTTP URLs are handled by the View's internal download logic
-            view.setSource(sourceUri);
-        } else if (sourceUri.startsWith("file://")) {
-            // Strip file:// prefix for local files
-            String path = sourceUri.substring(7);
-            view.setSource(path);
-        } else if (sourceUri.startsWith("asset://") || sourceUri.startsWith("asset:/")) {
-            // Load from Android assets
-            loadFromAsset(view, sourceUri);
-        } else {
-            // Plain path - pass directly
-            view.setSource(sourceUri);
-        }
-    }
-    
-    /**
-     * Load WebM from Android assets by copying to cache first
-     */
-    private void loadFromAsset(WebMAlphaGPUView view, String assetUri) {
-        final String assetPath = assetUri.replace("asset://", "").replace("asset:/", "")
-            .replaceFirst("^/", "");
-        
-        assetExecutor.execute(() -> {
-            try {
-                File tempFile = new File(reactContext.getCacheDir(), 
-                    "webm_asset_" + assetPath.hashCode() + ".webm");
-                
-                if (!tempFile.exists()) {
-                    InputStream is = reactContext.getAssets().open(assetPath);
-                    FileOutputStream fos = new FileOutputStream(tempFile);
-                    byte[] buffer = new byte[8192];
-                    int read;
-                    while ((read = is.read(buffer)) != -1) {
-                        fos.write(buffer, 0, read);
-                    }
-                    fos.close();
-                    is.close();
-                    Log.d(TAG, "Copied asset to cache: " + tempFile.getAbsolutePath());
-                }
-                
-                view.post(() -> view.setSource(tempFile.getAbsolutePath()));
-            } catch (Exception e) {
-                Log.e(TAG, "Failed to load asset: " + assetPath, e);
-            }
-        });
+        view.setSource(uri == null || uri.isEmpty() ? null : uri);
     }
     
     @ReactProp(name = "cacheKey")
     public void setCacheKey(WebMAlphaGPUView view, @Nullable String cacheKey) {
-        // Pass cacheKey directly to the View so it can use it for downloads
         view.setCacheKey(cacheKey);
     }
     
@@ -142,19 +67,19 @@ public class WebMAlphaGPUViewManager extends SimpleViewManager<WebMAlphaGPUView>
         view.setPaused(paused);
     }
     
-    /**
-     * Override backgroundColor to ignore it - GLSurfaceView uses its own rendering.
-     * This prevents potential issues with background drawables.
-     */
-    @ReactProp(name = "backgroundColor", customType = "Color")
-    public void setBackgroundColor(WebMAlphaGPUView view, @Nullable Integer color) {
-        // Intentionally ignored - GLSurfaceView renders its own background
-        Log.d(TAG, "setBackgroundColor ignored - GLSurfaceView renders its own background");
+    @ReactProp(name = "verbose", defaultBoolean = false)
+    public void setVerbose(WebMAlphaGPUView view, boolean verbose) {
+        view.setVerbose(verbose);
     }
     
+    /** TextureView can't have a background drawable; setting one throws. */
+    @ReactProp(name = "backgroundColor", customType = "Color")
+    public void setBackgroundColor(WebMAlphaGPUView view, @Nullable Integer color) {
+    }
+    
+    @Nullable
     @Override
-    public void onDropViewInstance(@NonNull WebMAlphaGPUView view) {
-        Log.d(TAG, "onDropViewInstance");
-        super.onDropViewInstance(view);
+    public Map<String, Object> getExportedCustomDirectEventTypeConstants() {
+        return PlayerEventForwarder.exportedEvents();
     }
 }

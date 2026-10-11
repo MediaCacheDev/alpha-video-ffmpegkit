@@ -49,13 +49,18 @@ public class WebMAlphaCPUView: UIView {
     private var loop: Bool = true
     private var paused: Bool = false
     @objc public var cacheKey: String?
+    @objc public var verbose: Bool = false
+    @objc public var onLoad: (([AnyHashable: Any]) -> Void)?
+    @objc public var onError: (([AnyHashable: Any]) -> Void)?
+    @objc public var onEnd: (([AnyHashable: Any]) -> Void)?
 
     private var isPlaying = false
     private var isDecoding = false
     private var shouldStop = false
+    /// Bumped by every start, so work left over from an earlier source or pause stops itself.
+    private var generation = 0
 
     private var playbackQueue: DispatchQueue?
-    private var downloadTask: URLSessionDataTask?
 
     // Video metadata
     private var videoWidth: Int = 0
@@ -98,7 +103,7 @@ public class WebMAlphaCPUView: UIView {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            print("[WebMAlphaCPUView] Memory warning - clearing frame cache")
+            self?.log("Memory warning - clearing frame cache")
             frameCache.removeAllObjects()
             self?.stopPlayback()
         }
@@ -123,8 +128,6 @@ public class WebMAlphaCPUView: UIView {
     
     private func cleanup() {
         shouldStop = true
-        downloadTask?.cancel()
-        downloadTask = nil
         isPlaying = false
         isDecoding = false
     }
@@ -135,40 +138,29 @@ public class WebMAlphaCPUView: UIView {
             return
         }
         
-        let uri = dict["uri"] as? String ?? dict["path"] as? String
-        guard let uriString = uri, !uriString.isEmpty else {
+        guard let uriString = dict["uri"] as? String, !uriString.isEmpty else {
             cleanup()
             return
         }
-        
-        // Compute hash for caching - use the path only (not query params) for stable keys
-        // Extract path from URL to avoid presigned URL query params
-        let pathOnly: String
-        if let url = URL(string: uriString) {
-            pathOnly = url.path
-        } else {
-            pathOnly = uriString
+        if let key = dict["cacheKey"] as? String, !key.isEmpty {
+            cacheKey = key
         }
         
-        // Use djb2 hash for consistent, unique keys
+        // Decoded frames are shared between views showing the same clip.
+        let identity = WebMSourceResolver.identity(for: uriString, cacheKey: cacheKey)
         var hashValue: UInt64 = 5381
-        for char in pathOnly.utf8 {
+        for char in identity.utf8 {
             hashValue = ((hashValue << 5) &+ hashValue) &+ UInt64(char)
         }
         let hashString = String(format: "%016llx", hashValue)
         
-        print("[WebMAlphaCPUView] Source path: \(pathOnly)")
-        print("[WebMAlphaCPUView] Frame cache key: \(hashString)")
-        
-        // If source changed, stop current playback
         if self.source != uriString {
             cleanup()
-            shouldStop = false // Reset for new source
         }
         
         self.source = uriString
         self.sourceHash = hashString
-        print("[WebMAlphaCPUView] setSource: \(uriString.prefix(80)), hash=\(hashString.prefix(8)), autoPlay=\(autoPlay), paused=\(paused)")
+        log("setSource: \(uriString.prefix(80)), frame cache key \(hashString.prefix(8))")
         
         if autoPlay && !paused && !isPlaying && !isDecoding {
             startPlayback()
@@ -190,7 +182,6 @@ public class WebMAlphaCPUView: UIView {
     }
     
     private func updatePlaybackState() {
-        print("[WebMAlphaCPUView] updatePlaybackState: paused=\(paused), autoPlay=\(autoPlay), isPlaying=\(isPlaying), isDecoding=\(isDecoding)")
         if paused {
             stopPlayback()
         } else if autoPlay && !isPlaying && !isDecoding && source != nil {
@@ -199,31 +190,26 @@ public class WebMAlphaCPUView: UIView {
     }
     
     private func startPlayback() {
-        guard let source = source, let hash = sourceHash else {
-            print("[WebMAlphaCPUView] startPlayback: no source")
-            return
-        }
-        
-        if isPlaying || isDecoding {
-            print("[WebMAlphaCPUView] startPlayback: already playing or decoding")
-            return
-        }
-        
-        print("[WebMAlphaCPUView] startPlayback: starting for \(source.prefix(50))")
+        guard let source = source, let hash = sourceHash else { return }
+        if isPlaying || isDecoding { return }
         
         shouldStop = false
+        generation += 1
+        let gen = generation
+        let key = cacheKey
         
         // Check if frames are already cached
         if let cached = frameCache.object(forKey: hash as NSString) {
-            print("[WebMAlphaCPUView] Using cached frames for \(hash.prefix(8))")
+            log("Using cached frames for \(hash.prefix(8))")
             isPlaying = true
             videoWidth = cached.width
             videoHeight = cached.height
             frameRate = cached.frameRate
+            emitLoad(frames: cached.frames.count, gen: gen)
             playbackQueue?.async { [weak self] in
-                self?.playFramesFromCache(cached.frames)
+                self?.playFramesFromCache(cached.frames, gen: gen)
                 DispatchQueue.main.async {
-                    self?.isPlaying = false
+                    if self?.generation == gen { self?.isPlaying = false }
                 }
             }
             return
@@ -232,15 +218,19 @@ public class WebMAlphaCPUView: UIView {
         // Need to decode - use shared serial queue to prevent memory spikes
         isDecoding = true
         sharedFFmpegQueue.async { [weak self] in
-            guard let self = self, !self.shouldStop else {
+            guard let self = self, !self.isStopped(gen) else {
                 DispatchQueue.main.async { self?.isDecoding = false }
                 return
             }
-            self.decodeAndPlay(source: source, hash: hash)
+            self.decodeAndPlay(source: source, cacheKey: key, hash: hash, gen: gen)
             DispatchQueue.main.async {
-                self.isDecoding = false
+                if self.generation == gen { self.isDecoding = false }
             }
         }
+    }
+    
+    private func isStopped(_ gen: Int) -> Bool {
+        return shouldStop || gen != generation
     }
     
     private func stopPlayback() {
@@ -248,29 +238,25 @@ public class WebMAlphaCPUView: UIView {
         isPlaying = false
     }
     
-    private func decodeAndPlay(source: String, hash: String) {
-        var localPath = source
-        
-        // Download remote URLs to cache
-        if source.hasPrefix("http://") || source.hasPrefix("https://") {
-            guard let downloaded = downloadToCache(urlString: source) else {
-                print("[WebMAlphaCPUView] Failed to download video")
-                return
+    private func decodeAndPlay(source: String, cacheKey: String?, hash: String, gen: Int) {
+        let localPath: String
+        do {
+            localPath = try WebMSourceResolver.localPath(for: source, cacheKey: cacheKey) { [weak self] in
+                self?.isStopped(gen) ?? true
             }
-            localPath = downloaded
-        } else if source.hasPrefix("file://") {
-            localPath = String(source.dropFirst(7))
-        }
-        
-        guard !shouldStop else { return }
-        
-        // Get video metadata using ffprobe
-        guard probeVideo(path: localPath) else {
-            print("[WebMAlphaCPUView] Failed to probe video")
+        } catch {
+            if !isStopped(gen) { emitError("Failed to load \(source): \(error.localizedDescription)", gen: gen) }
             return
         }
         
-        guard !shouldStop else { return }
+        guard !isStopped(gen) else { return }
+        
+        guard probeVideo(path: localPath) else {
+            if !isStopped(gen) { emitError("Failed to probe \(source)", gen: gen) }
+            return
+        }
+        
+        guard !isStopped(gen) else { return }
         
         // Create temp directory for frames
         let framesDir = FileManager.default.temporaryDirectory
@@ -287,31 +273,22 @@ public class WebMAlphaCPUView: UIView {
         
         let ffmpegCmd = "-c:v libvpx-vp9 -i \"\(localPath)\" -vf format=rgba -f rawvideo \"\(rawFile.path)\""
         
-        print("[WebMAlphaCPUView] FFmpeg command: ffmpeg \(ffmpegCmd)")
-        
         guard executeFFmpeg(command: ffmpegCmd) else {
-            print("[WebMAlphaCPUView] FFmpeg failed")
+            if !isStopped(gen) { emitError("Failed to decode \(source)", gen: gen) }
             return
         }
         
-        guard !shouldStop else { return }
+        guard !isStopped(gen) else { return }
         
-        // Calculate frame info
-        guard let fileSize = try? FileManager.default.attributesOfItem(atPath: rawFile.path)[.size] as? Int else {
-            print("[WebMAlphaCPUView] Could not get file size")
-            return
-        }
-        
+        let fileSize = (try? FileManager.default.attributesOfItem(atPath: rawFile.path)[.size] as? Int) ?? 0
         let frameSize = videoWidth * videoHeight * 4 // RGBA = 4 bytes per pixel
         totalFrames = fileSize / frameSize
         
-        print("[WebMAlphaCPUView] Decoded \(totalFrames) frames, \(videoWidth)x\(videoHeight), ~\(fileSize / 1024 / 1024)MB raw")
+        log("Decoded \(totalFrames) frames, \(videoWidth)x\(videoHeight), ~\(fileSize / 1024 / 1024)MB raw")
         
-        guard totalFrames > 0, !shouldStop else { return }
-        
-        // Read all frames into memory and cache them
-        guard let fileHandle = try? FileHandle(forReadingFrom: rawFile) else {
-            print("[WebMAlphaCPUView] Could not open raw file")
+        guard !isStopped(gen) else { return }
+        guard totalFrames > 0, let fileHandle = try? FileHandle(forReadingFrom: rawFile) else {
+            emitError("No frames decoded from \(source)", gen: gen)
             return
         }
         
@@ -328,43 +305,44 @@ public class WebMAlphaCPUView: UIView {
         
         try? fileHandle.close()
         
-        guard frames.count > 0, !shouldStop else { return }
+        guard frames.count > 0, !isStopped(gen) else { return }
         
         // Cache the frames
         let cacheEntry = FrameCacheEntry(frames: frames, width: videoWidth, height: videoHeight, frameRate: frameRate)
         let cost = frames.reduce(0) { $0 + $1.count }
         frameCache.setObject(cacheEntry, forKey: hash as NSString, cost: cost)
-        print("[WebMAlphaCPUView] Cached \(frames.count) frames for \(hash.prefix(8)), cost=\(cost / 1024)KB")
+        log("Cached \(frames.count) frames for \(hash.prefix(8)), cost=\(cost / 1024)KB")
         
         // Decoding complete - start playback on the view's own playback queue
         // This frees up the shared FFmpeg queue for other videos to decode
         DispatchQueue.main.async { [weak self] in
-            guard let self = self, !self.shouldStop else { return }
+            guard let self = self, !self.isStopped(gen) else { return }
             self.isPlaying = true
+            self.emitLoad(frames: frames.count, gen: gen)
             self.playbackQueue?.async { [weak self] in
-                self?.playFramesFromCache(frames)
+                self?.playFramesFromCache(frames, gen: gen)
                 DispatchQueue.main.async {
-                    self?.isPlaying = false
+                    if self?.generation == gen { self?.isPlaying = false }
                 }
             }
         }
     }
     
-    private func playFramesFromCache(_ frames: [Data]) {
+    private func playFramesFromCache(_ frames: [Data], gen: Int) {
         let frameInterval: TimeInterval = 1.0 / frameRate
         
         repeat {
             var frameIndex = 0
             let startTime = CACurrentMediaTime()
             
-            while !shouldStop && frameIndex < frames.count {
+            while !isStopped(gen) && frameIndex < frames.count {
                 autoreleasepool {
                     let data = frames[frameIndex]
                     
                     // Convert RGBA to UIImage and display
                     if let image = createImage(from: data) {
                         DispatchQueue.main.async { [weak self] in
-                            guard self?.shouldStop != true else { return }
+                            guard self?.isStopped(gen) == false else { return }
                             self?.imageView.image = image
                         }
                     }
@@ -381,15 +359,18 @@ public class WebMAlphaCPUView: UIView {
                 }
             }
             
-        } while loop && !shouldStop
+        } while loop && !isStopped(gen)
         
-        print("[WebMAlphaCPUView] Playback finished")
+        if !isStopped(gen) {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, self.generation == gen else { return }
+                self.onEnd?([:])
+            }
+        }
     }
     
     private func probeVideo(path: String) -> Bool {
         let probeCmd = "-v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate -of csv=p=0 \"\(path)\""
-        
-        print("[WebMAlphaCPUView] FFprobe command: ffprobe \(probeCmd)")
         
         guard let output = executeFFprobe(command: probeCmd) else {
             return false
@@ -399,8 +380,6 @@ public class WebMAlphaCPUView: UIView {
         guard !trimmedOutput.isEmpty else {
             return false
         }
-        
-        print("[WebMAlphaCPUView] FFprobe output: \(trimmedOutput)")
         
         // Parse output: width,height,fps_num/fps_den
         let lines = trimmedOutput.components(separatedBy: "\n")
@@ -431,7 +410,7 @@ public class WebMAlphaCPUView: UIView {
             frameRate = rate
         }
         
-        print("[WebMAlphaCPUView] Video: \(videoWidth)x\(videoHeight) @ \(frameRate)fps")
+        log("Video: \(videoWidth)x\(videoHeight) @ \(frameRate)fps")
         return videoWidth > 0 && videoHeight > 0
     }
     
@@ -495,88 +474,31 @@ public class WebMAlphaCPUView: UIView {
         return UIImage(cgImage: cgImage)
     }
     
-    private func downloadToCache(urlString: String) -> String? {
-        guard let url = URL(string: urlString) else { return nil }
-        
-        // Generate cache path
-        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-        
-        // Use cacheKey if provided, otherwise extract just the path component (without query params) for more stable caching
-        // This prevents presigned URL expiry from causing re-downloads
-        let cacheFile: URL
-        if let cacheKey = cacheKey {
-            // cacheKey represents the full path from cache directory
-            // Create directory structure and file path
-            let pathComponents = cacheKey.split(separator: "/").map { String($0) }
-            var currentDir = cacheDir
-            
-            // Create intermediate directories (all parts except the last)
-            for component in pathComponents.dropLast() {
-                currentDir = currentDir.appendingPathComponent(component)
-            }
-            
-            // Create the directory structure
-            try? FileManager.default.createDirectory(at: currentDir, withIntermediateDirectories: true)
-            
-            // Use the last component as filename
-            let fileName = pathComponents.last ?? "unknown"
-            cacheFile = currentDir.appendingPathComponent(fileName)
-        } else {
-            // For hash-based caching, use webm-cache subdirectory
-            let webmCacheDir = cacheDir.appendingPathComponent("webm-cache")
-            try? FileManager.default.createDirectory(at: webmCacheDir, withIntermediateDirectories: true)
-            
-            let pathOnly = url.path
-            
-            // Use djb2 hash of the path to ensure unique cache files per video
-            var hashValue: UInt64 = 5381
-            for char in pathOnly.utf8 {
-                hashValue = ((hashValue << 5) &+ hashValue) &+ UInt64(char)
-            }
-            let cacheFileName = String(format: "%016llx.webm", hashValue)
-            cacheFile = webmCacheDir.appendingPathComponent(cacheFileName)
+    // MARK: - Events and logging
+    
+    private func emitLoad(frames: Int, gen: Int) {
+        let body: [AnyHashable: Any] = ["totalFrames": frames, "width": videoWidth, "height": videoHeight]
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.generation == gen else { return }
+            self.onLoad?(body)
         }
-        
-        print("[WebMAlphaCPUView] Cache key for '\(url.path)' -> \(cacheFile.path)")
-        
-        // Check cache
-        if FileManager.default.fileExists(atPath: cacheFile.path) {
-            print("[WebMAlphaCPUView] Using cached: \(cacheFile.path)")
-            return cacheFile.path
+    }
+    
+    private func emitError(_ message: String, gen: Int) {
+        NSLog("[WebMAlphaCPUView] %@", message)
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.generation == gen else { return }
+            self.onError?(["error": message])
         }
-        
-        // Download synchronously (we're already on background thread)
-        print("[WebMAlphaCPUView] Downloading: \(urlString.prefix(80))...")
-        
-        let semaphore = DispatchSemaphore(value: 0)
-        var downloadedPath: String?
-        
-        let task = URLSession.shared.dataTask(with: url) { data, response, error in
-            defer { semaphore.signal() }
-            
-            guard let data = data, error == nil else {
-                print("[WebMAlphaCPUView] Download error: \(error?.localizedDescription ?? "unknown")")
-                return
-            }
-            
-            do {
-                try data.write(to: cacheFile)
-                print("[WebMAlphaCPUView] Downloaded to: \(cacheFile.path)")
-                downloadedPath = cacheFile.path
-            } catch {
-                print("[WebMAlphaCPUView] Save error: \(error)")
-            }
-        }
-        task.resume()
-        
-        _ = semaphore.wait(timeout: .now() + 60)
-        return downloadedPath
+    }
+    
+    private func log(_ message: @autoclosure () -> String) {
+        if verbose { NSLog("[WebMAlphaCPUView] %@", message()) }
     }
     
     // FFmpegKit wrapper functions
     private func executeFFmpeg(command: String) -> Bool {
         guard let session = FFmpegKit.execute(command) else {
-            print("[WebMAlphaCPUView] FFmpegKit.execute returned nil")
             return false
         }
         let returnCode = session.getReturnCode()

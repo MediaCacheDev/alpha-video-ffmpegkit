@@ -15,22 +15,13 @@ import android.view.TextureView;
 
 import androidx.annotation.Nullable;
 
-import com.arthenica.ffmpegkit.FFmpegKit;
-import com.arthenica.ffmpegkit.FFmpegSession;
-import com.arthenica.ffmpegkit.FFprobeKit;
-import com.arthenica.ffmpegkit.FFprobeSession;
-import com.arthenica.ffmpegkit.ReturnCode;
-
 import java.io.File;
-import java.io.FileOutputStream;
-import java.io.InputStream;
+import java.io.IOException;
 import java.io.RandomAccessFile;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.security.MessageDigest;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * WebMAlphaCPUView - CPU-based VP9+Alpha WebM player using FFmpegKit
@@ -40,8 +31,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 
  * Features:
  * - True VP9+alpha decoding via FFmpeg's libvpx
- * - Memory-efficient frame extraction to raw RGBA
- * - Caching for remote videos
+ * - Frames are decoded once to a raw RGBA file in the cache and read back one at a time
+ * - Sources: https (downloaded to the cache), files, asset://, res/raw names and content://
  * - Looping support
  * 
  * For GPU-accelerated rendering, use WebMAlphaGPUView instead.
@@ -60,6 +51,11 @@ public class WebMAlphaCPUView extends TextureView implements TextureView.Surface
     private final AtomicBoolean isPlaying = new AtomicBoolean(false);
     private final AtomicBoolean shouldStop = new AtomicBoolean(false);
     private final AtomicBoolean isDestroyed = new AtomicBoolean(false);
+    // Bumped by every start, so a job left over from an earlier source or pause stops itself.
+    private final AtomicInteger generation = new AtomicInteger();
+    private volatile int runningGeneration;
+    private PlayerCallback callback;
+    private volatile boolean verbose = false;
     
     // Frame data
     private Bitmap frameBitmap;
@@ -111,8 +107,17 @@ public class WebMAlphaCPUView extends TextureView implements TextureView.Surface
         }
     }
     
+    public void setCallback(@Nullable PlayerCallback callback) {
+        this.callback = callback;
+    }
+
+    public void setVerbose(boolean verbose) {
+        this.verbose = verbose;
+    }
+
     public void setSource(@Nullable String source) {
-        Log.d(TAG, "setSource: " + (source != null ? source.substring(0, Math.min(80, source.length())) : "null"));
+        if (source != null && source.equals(sourcePath)) return;
+        logD("setSource: " + (source != null ? source.substring(0, Math.min(80, source.length())) : "null"));
         
         stopPlayback();
         this.sourcePath = source;
@@ -144,7 +149,6 @@ public class WebMAlphaCPUView extends TextureView implements TextureView.Surface
      */
     public void setCacheKey(@Nullable String cacheKey) {
         this.cacheKey = cacheKey;
-        Log.d(TAG, "setCacheKey: " + cacheKey);
     }
     
     private void updatePlaybackState() {
@@ -162,17 +166,21 @@ public class WebMAlphaCPUView extends TextureView implements TextureView.Surface
             return;
         }
         
+        final int gen = generation.incrementAndGet();
+        final String source = sourcePath;
         shouldStop.set(false);
         isPlaying.set(true);
         
         try {
             getOrCreateExecutor().execute(() -> {
+                runningGeneration = gen;
                 try {
-                    playVideo(sourcePath);
+                    playVideo(source);
                 } catch (Exception e) {
                     Log.e(TAG, "Playback error", e);
+                    reportError("Playback failed: " + e.getMessage());
                 } finally {
-                    isPlaying.set(false);
+                    if (gen == generation.get()) isPlaying.set(false);
                 }
             });
         } catch (Exception e) {
@@ -187,112 +195,58 @@ public class WebMAlphaCPUView extends TextureView implements TextureView.Surface
     }
     
     private void playVideo(String source) {
-        String localPath = source;
-        
-        // Download remote URLs to cache
-        if (source.startsWith("http://") || source.startsWith("https://")) {
-            localPath = downloadToCache(source);
-            if (localPath == null) {
-                Log.e(TAG, "Failed to download video");
-                return;
-            }
-        } else if (source.startsWith("file://")) {
-            localPath = source.substring(7);
-        }
-        
-        // Get video metadata
-        if (!probeVideo(localPath)) {
-            Log.e(TAG, "Failed to probe video");
+        WebMSource local;
+        FFmpegDecoder.VideoInfo info;
+        try {
+            local = resolveSource(source);
+            info = FFmpegDecoder.probe(getContext(), local);
+        } catch (IOException | IllegalArgumentException e) {
+            if (!stopRequested()) reportError("Failed to load " + source + ": " + e.getMessage());
             return;
         }
+        videoWidth = info.width;
+        videoHeight = info.height;
+        frameRate = info.frameRate;
+        logD("Video: " + videoWidth + "x" + videoHeight + " @ " + frameRate + "fps");
+        if (stopRequested()) return;
         
-        // Create temp directory for frames
         File framesDir = new File(getContext().getCacheDir(), "webm-frames-" + System.currentTimeMillis());
         framesDir.mkdirs();
         
         try {
-            // Extract all frames as RGBA using FFmpeg
-            // CRITICAL: Use -c:v libvpx-vp9 to force VP9 decoder that supports alpha
             File rawFile = new File(framesDir, "frames.rgba");
-            
-            String ffmpegCmd = String.format(
-                "-c:v libvpx-vp9 -i %s -vf format=rgba -f rawvideo %s",
-                escapePath(localPath), escapePath(rawFile.getAbsolutePath())
-            );
-            
-            Log.d(TAG, "FFmpeg command: " + ffmpegCmd);
-            
-            FFmpegSession session = FFmpegKit.execute(ffmpegCmd);
-            
-            if (!ReturnCode.isSuccess(session.getReturnCode())) {
-                Log.e(TAG, "FFmpeg failed: " + session.getOutput());
+            try {
+                FFmpegDecoder.decode(getContext(), local, "-vf format=rgba -f rawvideo", rawFile);
+            } catch (IOException e) {
+                if (!stopRequested()) reportError("Failed to decode " + source + ": " + e.getMessage());
                 return;
             }
             
-            // Calculate frame size
             int frameSize = videoWidth * videoHeight * 4; // RGBA = 4 bytes per pixel
-            long fileSize = rawFile.length();
-            totalFrames = (int) (fileSize / frameSize);
+            totalFrames = (int) (rawFile.length() / frameSize);
+            logD("Decoded " + totalFrames + " frames, " + videoWidth + "x" + videoHeight);
             
-            Log.d(TAG, "Decoded " + totalFrames + " frames, " + videoWidth + "x" + videoHeight);
-            
-            if (totalFrames > 0) {
-                playFrames(rawFile, frameSize);
+            if (totalFrames == 0) {
+                if (!stopRequested()) reportError("No frames decoded from " + source);
+                return;
             }
-            
+            reportLoad();
+            playFrames(rawFile, frameSize);
         } finally {
             deleteRecursive(framesDir);
         }
     }
     
-    private String escapePath(String path) {
-        return "\"" + path.replace("\"", "\\\"") + "\"";
+    private WebMSource resolveSource(String source) throws IOException {
+        if (WebMDownloader.isRemote(source)) {
+            return WebMSource.file(
+                WebMDownloader.fetch(getContext(), source, cacheKey, this::stopRequested).getAbsolutePath());
+        }
+        return WebMSource.parse(source);
     }
     
-    private boolean probeVideo(String path) {
-        String probeCmd = String.format(
-            "-v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate -of csv=p=0 %s",
-            escapePath(path)
-        );
-        
-        FFprobeSession probeSession = FFprobeKit.execute(probeCmd);
-        
-        if (!ReturnCode.isSuccess(probeSession.getReturnCode())) {
-            Log.e(TAG, "FFprobe failed: " + probeSession.getOutput());
-            return false;
-        }
-        
-        String output = probeSession.getOutput().trim();
-        
-        try {
-            String[] lines = output.split("\n");
-            String lastLine = lines[lines.length - 1].trim();
-            String[] parts = lastLine.split(",");
-            
-            if (parts.length >= 3) {
-                videoWidth = Integer.parseInt(parts[0].trim());
-                videoHeight = Integer.parseInt(parts[1].trim());
-                
-                String fps = parts[2].trim();
-                if (fps.contains("/")) {
-                    String[] fpsParts = fps.split("/");
-                    double num = Double.parseDouble(fpsParts[0]);
-                    double den = Double.parseDouble(fpsParts[1]);
-                    if (den > 0) {
-                        frameRate = num / den;
-                    }
-                } else {
-                    frameRate = Double.parseDouble(fps);
-                }
-                
-                Log.d(TAG, "Video: " + videoWidth + "x" + videoHeight + " @ " + frameRate + "fps");
-                return videoWidth > 0 && videoHeight > 0;
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to parse video metadata", e);
-        }
-        
-        return false;
+    private boolean stopRequested() {
+        return shouldStop.get() || isDestroyed.get() || runningGeneration != generation.get();
     }
     
     private void playFrames(File rawFile, int frameSize) {
@@ -306,7 +260,7 @@ public class WebMAlphaCPUView extends TextureView implements TextureView.Surface
                 long startTime = System.nanoTime();
                 int frameIndex = 0;
                 
-                while (!shouldStop.get() && !isDestroyed.get() && frameIndex < totalFrames) {
+                while (!stopRequested() && frameIndex < totalFrames) {
                     int bytesRead = raf.read(frameBuffer);
                     if (bytesRead != frameSize) break;
                     
@@ -328,8 +282,9 @@ public class WebMAlphaCPUView extends TextureView implements TextureView.Surface
                     }
                 }
                 
-            } while (loop && !shouldStop.get() && !isDestroyed.get());
+            } while (loop && !stopRequested());
             
+            if (!stopRequested()) reportEnd();
         } catch (Exception e) {
             Log.e(TAG, "Error playing frames", e);
         }
@@ -412,89 +367,31 @@ public class WebMAlphaCPUView extends TextureView implements TextureView.Surface
         }
     }
     
-    private String downloadToCache(String urlString) {
-        try {
-            File cacheFile;
-            String tempSuffix;
-            
-            // Use custom cacheKey if provided, otherwise fall back to URL hash
-            if (cacheKey != null && !cacheKey.isEmpty()) {
-                // Use custom cache path - create parent directories as needed
-                cacheFile = new File(getContext().getCacheDir(), cacheKey);
-                File parentDir = cacheFile.getParentFile();
-                if (parentDir != null && !parentDir.exists()) {
-                    parentDir.mkdirs();
-                }
-                tempSuffix = String.valueOf(cacheKey.hashCode());
-                Log.d(TAG, "📁 Using custom cacheKey: " + cacheKey);
-            } else {
-                // Fall back to URL hash-based cache key
-                MessageDigest md = MessageDigest.getInstance("MD5");
-                byte[] hashBytes = md.digest(urlString.getBytes());
-                StringBuilder sb = new StringBuilder();
-                for (byte b : hashBytes) {
-                    sb.append(String.format("%02x", b));
-                }
-                String hash = sb.toString().substring(0, 16);
-                
-                File cacheDir = new File(getContext().getCacheDir(), "webm-cache");
-                if (!cacheDir.exists()) {
-                    cacheDir.mkdirs();
-                }
-                
-                cacheFile = new File(cacheDir, hash + ".webm");
-                tempSuffix = hash;
-            }
-            
-            if (cacheFile.exists()) {
-                Log.d(TAG, "📦 Using cached: " + cacheFile.getAbsolutePath());
-                return cacheFile.getAbsolutePath();
-            }
-            
-            URL url = new URL(urlString);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setConnectTimeout(15000);
-            conn.setReadTimeout(30000);
-            conn.setRequestProperty("User-Agent", "WebMAlphaPlayer/1.0");
-            
-            int responseCode = conn.getResponseCode();
-            if (responseCode != HttpURLConnection.HTTP_OK) {
-                Log.e(TAG, "❌ Download failed: HTTP " + responseCode);
-                return null;
-            }
-            
-            // Download to temp file first, then rename (atomic operation)
-            File tempFile = new File(getContext().getCacheDir(), "webm_tmp_" + tempSuffix + ".webm");
-            
-            try (InputStream in = conn.getInputStream();
-                 FileOutputStream out = new FileOutputStream(tempFile)) {
-                byte[] buffer = new byte[8192];
-                int bytesRead;
-                int totalBytes = 0;
-                while ((bytesRead = in.read(buffer)) != -1) {
-                    if (shouldStop.get()) {
-                        tempFile.delete();
-                        return null;
-                    }
-                    out.write(buffer, 0, bytesRead);
-                    totalBytes += bytesRead;
-                }
-                Log.d(TAG, "✅ Downloaded " + totalBytes + " bytes");
-            }
-            
-            // Atomic rename to final cache location
-            if (tempFile.renameTo(cacheFile)) {
-                return cacheFile.getAbsolutePath();
-            } else {
-                // Rename failed, use temp file directly
-                Log.w(TAG, "Failed to rename, using temp file");
-                return tempFile.getAbsolutePath();
-            }
-            
-        } catch (Exception e) {
-            Log.e(TAG, "Download failed", e);
-            return null;
-        }
+    private void reportLoad() {
+        final int gen = runningGeneration;
+        final int frames = totalFrames, width = videoWidth, height = videoHeight;
+        mainHandler.post(() -> {
+            if (callback != null && gen == generation.get()) callback.onLoad(frames, width, height);
+        });
+    }
+    
+    private void reportEnd() {
+        final int gen = runningGeneration;
+        mainHandler.post(() -> {
+            if (callback != null && gen == generation.get()) callback.onEnd();
+        });
+    }
+    
+    private void reportError(String error) {
+        Log.e(TAG, error);
+        final int gen = runningGeneration;
+        mainHandler.post(() -> {
+            if (callback != null && gen == generation.get()) callback.onError(error);
+        });
+    }
+    
+    private void logD(String message) {
+        if (verbose) Log.d(TAG, message);
     }
     
     private void deleteRecursive(File file) {
