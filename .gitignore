@@ -1,0 +1,17 @@
+node_modules/
+*.tgz
+.DS_Store
+
+# Build output
+android/build/
+android/.gradle/
+android/.cxx/
+ios/build/
+scripts/build/
+
+# FFmpegKit binaries, produced by scripts/build-ffmpeg-*.sh
+android/libs/*.aar
+
+# Local backups and experiments
+*.old
+*_claude_attempt.swift
