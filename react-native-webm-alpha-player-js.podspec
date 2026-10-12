@@ -33,20 +33,6 @@ Pod::Spec.new do |s|
 
   s.static_framework = true
 
-  # FFmpegKit with a VP9-only FFmpeg (ffmpegkit-vp9, scripts/fetch-ffmpegkit-ios.sh). These are dynamic
-  # frameworks (LGPL: users can replace them); CocoaPods embeds them in the app.
-  s.vendored_frameworks = [
-    "ios/Frameworks/ffmpegkit.xcframework",
-    "ios/Frameworks/libavcodec.xcframework",
-    "ios/Frameworks/libavformat.xcframework",
-    "ios/Frameworks/libavutil.xcframework",
-    "ios/Frameworks/libswresample.xcframework",
-    "ios/Frameworks/libswscale.xcframework",
-    "ios/Frameworks/libavfilter.xcframework",
-    "ios/Frameworks/libavdevice.xcframework"
-
-  ]
-
   s.frameworks = [
     "Foundation",
     "UIKit",
@@ -65,6 +51,10 @@ Pod::Spec.new do |s|
   ]
 
   s.dependency "React-Core"
+  # FFmpegKit with a VP9-only FFmpeg (github.com/MediaCacheDev/ffmpegkit-vp9). Dynamic frameworks
+  # (LGPL: users can replace them), embedded in the app. 6.0.0 is the last version on CocoaPods
+  # trunk, which is read-only from 2 December 2026.
+  s.dependency "ffmpegkit-vp9", "6.0.0"
 
   s.pod_target_xcconfig = {
     'DEFINES_MODULE' => 'YES',

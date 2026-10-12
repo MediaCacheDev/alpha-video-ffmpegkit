@@ -7,10 +7,6 @@ android/build/
 android/.gradle/
 android/.cxx/
 ios/build/
-
-# ffmpegkit-vp9 XCFrameworks, from scripts/fetch-ffmpegkit-ios.sh
-ios/Frameworks/
-
 # Local backups and experiments
 *.old
 *_claude_attempt.swift

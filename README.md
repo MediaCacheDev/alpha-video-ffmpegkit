@@ -35,7 +35,7 @@ yarn add react-native-webm-alpha-player-js
 cd ios && pod install
 ```
 
-The npm package ships the FFmpegKit XCFrameworks in `ios/Frameworks`. They are dynamic frameworks, and CocoaPods embeds them in the app. They aren't in git, so a clone of this repo needs `./scripts/fetch-ffmpegkit-ios.sh` first, which downloads them from the ffmpegkit-vp9 release and checks their SHA-256.
+The podspec depends on the `ffmpegkit-vp9` 6.0.0 pod from CocoaPods trunk, a minimal FFmpegKit build. Its XCFrameworks are dynamic, and CocoaPods embeds them in the app.
 
 ### Android Setup
 

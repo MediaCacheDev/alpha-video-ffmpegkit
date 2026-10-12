@@ -17,7 +17,6 @@
     "licenses"
   ],
   "scripts": {
-    "fetch:ffmpegkit:ios": "./scripts/fetch-ffmpegkit-ios.sh",
     "prepack": "echo 'Packing react-native-webm-alpha-player-js...'"
   },
   "repository": {
