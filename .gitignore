@@ -8,9 +8,12 @@ android/.gradle/
 android/.cxx/
 ios/build/
 scripts/build/
+scripts/maven/.gradle/
+scripts/maven/build/
 
 # FFmpegKit binaries, produced by scripts/build-ffmpeg-*.sh
 android/libs/*.aar
+ios/Frameworks/
 
 # Local backups and experiments
 *.old

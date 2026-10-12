@@ -20,19 +20,14 @@ android {
     compileSdkVersion safeExtGet('compileSdkVersion', 34)
     
     defaultConfig {
-        minSdkVersion safeExtGet('minSdkVersion', 21)
+        // FFmpegKit 6.0 needs API 24
+        minSdkVersion safeExtGet('minSdkVersion', 24)
         targetSdkVersion safeExtGet('targetSdkVersion', 34)
     }
     
     buildTypes {
         release {
             minifyEnabled false
-        }
-    }
-    
-    sourceSets {
-        main {
-            jniLibs.srcDirs = ['libs']
         }
     }
     
@@ -49,20 +44,15 @@ android {
 repositories {
     google()
     mavenCentral()
-    maven { url 'https://jitpack.io' }
+    // Until dev.mediacache:ffmpegkit-vp9 is on Maven Central:
+    // scripts/build-ffmpeg-android.sh && scripts/publish-ffmpegkit-android.sh local
+    mavenLocal()
 }
 
 dependencies {
     implementation 'com.facebook.react:react-native:+'
     
-    // FFmpegKit for VP9+alpha WebM playback
-    // Using local AAR built with our minimal VP9-only config (~30MB)
-    // Built with: ./scripts/build-ffmpeg-android.sh
-    implementation fileTree(dir: 'libs', include: ['*.aar'])
-    
-    // FFmpegKit's required runtime dependency (not bundled in AAR)
-    implementation 'com.arthenica:smart-exception-java:0.2.1'
-    
-    // Alternative: Use published 'full' variant from Maven (includes libvpx, ~40MB)
-    // implementation 'com.arthenica:ffmpeg-kit-full:6.0-2'
+    // FFmpegKit with a VP9-only FFmpeg (scripts/build-ffmpeg-android.sh). Brings in
+    // com.arthenica:smart-exception-java through its POM.
+    implementation 'dev.mediacache:ffmpegkit-vp9:6.0.0'
 }

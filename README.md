@@ -4,6 +4,14 @@ A React Native library for playing VP9+Alpha WebM videos with transparency suppo
 
 Every clip is decoded in full before the first frame is shown, and all frames are kept for playback (see [Memory](#memory)). That suits short UI animations; it doesn't suit long or large clips.
 
+This was the first attempt, and it stays as a reference implementation: the whole player is plain Java and Swift around FFmpeg command lines. For production, use [react-native-webm-alpha-player](https://github.com/danielkpl2/react-native-webm-alpha-player), which shares a C++ decoder between platforms:
+
+| | this package | react-native-webm-alpha-player |
+|---|---|---|
+| Decoding | FFmpegKit command line, to a raw file | libvpx through FFmpeg's API, in process |
+| Playback | whole clip decoded first | streaming, preload or both |
+| FFmpeg licence | LGPL-3.0 (FFmpegKit builds with `--enable-version3`) | LGPL-2.1 |
+
 ## Features
 
 - 🎬 **VP9 + Alpha channel support** - Play WebM videos with transparency
@@ -27,29 +35,41 @@ yarn add react-native-webm-alpha-player-js
 cd ios && pod install
 ```
 
-The FFmpegKit XCFrameworks are in `ios/Frameworks` and ship with the package.
+The npm package ships the FFmpegKit XCFrameworks in `ios/Frameworks`. They are dynamic frameworks, and CocoaPods embeds them in the app. They aren't in git, so a clone of this repo needs `./scripts/build-ffmpeg-ios.sh` first (see below).
 
 ### Android Setup
 
-FFmpegKit's own binaries are no longer published, and the AAR this library needs is **not** in the repo or the npm package yet. Build it with `scripts/build-ffmpeg-android.sh` (see below), which writes `android/libs/ffmpegkit.aar`; `android/build.gradle` picks it up from there.
+FFmpegKit's own binaries are no longer published. The library depends on `dev.mediacache:ffmpegkit-vp9:6.0.0`, a minimal FFmpegKit build made by `scripts/build-ffmpeg-android.sh` with the same `com.arthenica.ffmpegkit` API. It needs `minSdkVersion` 24.
 
-## Building FFmpeg (Development Only)
+Until that artifact is on Maven Central, publish it to your local Maven repository (`android/build.gradle` also looks in `mavenLocal()`):
 
-If you need to rebuild FFmpegKit from source:
+```bash
+./scripts/build-ffmpeg-android.sh
+./scripts/publish-ffmpegkit-android.sh local
+```
+
+## Building FFmpegKit
+
+The scripts build the archived [arthenica/ffmpeg-kit](https://github.com/arthenica/ffmpeg-kit) at a fixed commit (FFmpeg 6.0, libvpx 1.13.0), configured with `--disable-everything` plus what the player needs: the WebM demuxer, the libvpx VP9 decoder, rawvideo output, the file and pipe protocols, and a few filters. The result is about 4 MB for Android (four ABIs) and 11 MB for iOS, against 31 MB and 60 MB for a default `--enable-libvpx` build. The configure options are in `scripts/ffmpegkit-common.sh`.
 
 ### Android
-```bash
-# Set your NDK path
-export ANDROID_NDK_HOME=/path/to/android-ndk
 
-# Build
-./scripts/build-ffmpeg-android.sh
+Needs the Android SDK, an NDK (the newest one under `$ANDROID_HOME/ndk` is used; override with `FFMPEGKIT_NDK_HOME`) and Java 17. NDK r28 or newer links with 16 KB pages, and the script checks the 64-bit libraries for it. Output: `android/libs/ffmpegkit.aar`.
+
+```bash
+./scripts/build-ffmpeg-android.sh            # CLEAN=1 to start from scratch
+./scripts/publish-ffmpegkit-android.sh local # or central, with Maven Central credentials
 ```
 
 ### iOS
+
+Needs Xcode. Output: `ios/Frameworks/*.xcframework` (arm64 devices and arm64/x86_64 simulators).
+
 ```bash
 ./scripts/build-ffmpeg-ios.sh
 ```
+
+`./scripts/package-ffmpegkit-sources.sh` packs the corresponding source of the binaries for a release.
 
 ## Usage
 
@@ -234,12 +254,12 @@ ffmpeg -i input.mp4 -vf "chromakey=0x00ff00:0.1:0.2" -c:v libvpx-vp9 -pix_fmt yu
 ## Requirements
 
 - React Native 0.70+
-- Android: minSdkVersion 21, compileSdkVersion 34
+- Android: minSdkVersion 24, compileSdkVersion 34
 - iOS: iOS 13.0+
 
 ## License
 
-MIT
+The code in this repository is MIT. The FFmpegKit and FFmpeg binaries it depends on are LGPL-3.0, and libvpx is BSD-3-Clause; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Credits
 

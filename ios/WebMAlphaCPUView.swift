@@ -271,7 +271,7 @@ public class WebMAlphaCPUView: UIView {
         // CRITICAL: Use -c:v libvpx-vp9 to force VP9 decoder that supports alpha
         let rawFile = framesDir.appendingPathComponent("frames.rgba")
         
-        let ffmpegCmd = "-c:v libvpx-vp9 -i \"\(localPath)\" -vf format=rgba -f rawvideo \"\(rawFile.path)\""
+        let ffmpegCmd = "-c:v libvpx-vp9 -i \"\(localPath)\" -an -vf format=rgba -f rawvideo \"\(rawFile.path)\""
         
         guard executeFFmpeg(command: ffmpegCmd) else {
             if !isStopped(gen) { emitError("Failed to decode \(source)", gen: gen) }

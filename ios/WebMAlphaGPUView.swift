@@ -392,7 +392,7 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
         defer { try? FileManager.default.removeItem(atPath: rawFile) }
 
         // CRITICAL: Use libvpx-vp9 codec for proper VP9 alpha decoding
-        let command = "-c:v libvpx-vp9 -i \"\(filePath)\" -f rawvideo -pix_fmt yuva420p \"\(rawFile)\""
+        let command = "-c:v libvpx-vp9 -i \"\(filePath)\" -an -f rawvideo -pix_fmt yuva420p \"\(rawFile)\""
         guard let session = FFmpegKit.execute(command) else {
             throw WebMSourceError(message: "FFmpeg did not start")
         }

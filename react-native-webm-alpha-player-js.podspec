@@ -31,10 +31,10 @@ Pod::Spec.new do |s|
   ]
   s.swift_version = "5.0"
 
-  # Force static linking (VERY IMPORTANT)
   s.static_framework = true
 
-  # FFmpegKit static XCFrameworks
+  # FFmpegKit with a VP9-only FFmpeg, built by scripts/build-ffmpeg-ios.sh. These are dynamic
+  # frameworks (LGPL: users can replace them); CocoaPods embeds them in the app.
   s.vendored_frameworks = [
     "ios/Frameworks/ffmpegkit.xcframework",
     "ios/Frameworks/libavcodec.xcframework",

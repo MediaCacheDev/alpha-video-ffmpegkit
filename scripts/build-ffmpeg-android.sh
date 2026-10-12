@@ -1,21 +1,24 @@
 #!/bin/bash
 #
 # build-ffmpeg-android.sh
-# Builds FFmpegKit for Android with minimal VP9-only config
-# Produces an AAR with Java bindings for FFmpegKit API
+# Builds the minimal VP9 FFmpegKit AAR (see ffmpegkit-common.sh for what's in it) and copies it
+# to android/libs/ffmpegkit.aar, where scripts/publish-ffmpegkit-android.sh picks it up.
+#
+# Uses the newest installed NDK; r28+ links 16 KB-page-aligned by default, which the script
+# checks at the end. Override with FFMPEGKIT_NDK_HOME. CLEAN=1 starts from scratch.
 #
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$SCRIPT_DIR/build/android"
 OUTPUT_DIR="$PROJECT_DIR/android/libs"
 
-# Check prerequisites
-if [ -z "$ANDROID_SDK_ROOT" ]; then
-    # Try common locations
-    if [ -n "$ANDROID_HOME" ]; then
+source "$SCRIPT_DIR/ffmpegkit-common.sh"
+
+if [ -z "${ANDROID_SDK_ROOT:-}" ]; then
+    if [ -n "${ANDROID_HOME:-}" ]; then
         export ANDROID_SDK_ROOT="$ANDROID_HOME"
     elif [ -d "$HOME/Library/Android/sdk" ]; then
         export ANDROID_SDK_ROOT="$HOME/Library/Android/sdk"
@@ -24,24 +27,25 @@ if [ -z "$ANDROID_SDK_ROOT" ]; then
     fi
 fi
 
-if [ -z "$ANDROID_SDK_ROOT" ] || [ ! -d "$ANDROID_SDK_ROOT" ]; then
+if [ -z "${ANDROID_SDK_ROOT:-}" ] || [ ! -d "$ANDROID_SDK_ROOT" ]; then
     echo "❌ Android SDK not found"
     echo "   Set ANDROID_SDK_ROOT to your SDK installation path"
     exit 1
 fi
 
-if [ -z "$ANDROID_NDK_HOME" ]; then
-    # Try to find NDK in common locations
-    if [ -d "$ANDROID_SDK_ROOT/ndk" ]; then
-        export ANDROID_NDK_HOME=$(ls -d "$ANDROID_SDK_ROOT/ndk"/*/ 2>/dev/null | head -1 | sed 's:/$::')
-    elif [ -d "$ANDROID_HOME/ndk" ]; then
-        export ANDROID_NDK_HOME=$(ls -d "$ANDROID_HOME/ndk"/*/ 2>/dev/null | head -1 | sed 's:/$::')
-    fi
+# ANDROID_NDK_HOME is often pinned to an older NDK for other projects, so it isn't used here.
+if [ -n "${FFMPEGKIT_NDK_HOME:-}" ]; then
+    ANDROID_NDK_HOME="$FFMPEGKIT_NDK_HOME"
+elif [ -d "$ANDROID_SDK_ROOT/ndk" ]; then
+    ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/$(ls "$ANDROID_SDK_ROOT/ndk" | sort -V | tail -1)"
+else
+    ANDROID_NDK_HOME=""
 fi
+export ANDROID_NDK_HOME
 
-if [ -z "$ANDROID_NDK_HOME" ] || [ ! -d "$ANDROID_NDK_HOME" ]; then
+if [ -z "${ANDROID_NDK_HOME:-}" ] || [ ! -d "$ANDROID_NDK_HOME" ]; then
     echo "❌ Android NDK not found"
-    echo "   Set ANDROID_NDK_HOME to your NDK installation path"
+    echo "   Install one with the SDK manager, or set FFMPEGKIT_NDK_HOME"
     exit 1
 fi
 
@@ -57,77 +61,57 @@ echo "Build dir: $BUILD_DIR"
 echo "Output: $OUTPUT_DIR"
 echo ""
 
-mkdir -p "$BUILD_DIR"
-mkdir -p "$OUTPUT_DIR"
-
+mkdir -p "$BUILD_DIR" "$OUTPUT_DIR"
 cd "$BUILD_DIR"
 
-# Clone FFmpegKit if needed
-if [ ! -d "ffmpeg-kit" ]; then
-    echo "📥 Cloning FFmpegKit..."
-    git clone --depth 1 https://github.com/arthenica/ffmpeg-kit.git
-fi
-
+checkout_ffmpeg_kit
 cd ffmpeg-kit
 
-# Patch Android.mk to fix NDK 26+ compatibility
-# (newer NDK treats certain warnings as errors)
-if [ -f "android/jni/Android.mk" ]; then
-    echo "🔧 Patching Android.mk for NDK 26+ compatibility..."
-    sed -i '' 's/-Werror/-Wno-error/g' android/jni/Android.mk
+if [ "${CLEAN:-0}" = "1" ]; then
+    echo "🧹 Cleaning previous build..."
+    rm -rf prebuilt .tmp
 fi
 
-echo ""
-echo "🔨 Building FFmpegKit (this may take 30-60 minutes)..."
-echo ""
-echo "Configuration:"
-echo "  - VP9 decoder (libvpx)"
-echo "  - WebM/Matroska demuxer"
-echo "  - File protocol"
-echo ""
+# Newer NDKs turn some of ffmpeg-kit's warnings into errors.
+git checkout -q -- android/jni/Android.mk
+sed -i '' 's/-Werror/-Wno-error/g' android/jni/Android.mk
 
-# Build with libvpx enabled for VP9 decoding
-# Disable x86 (32-bit) since it's rarely used
-# Keep: arm64-v8a, armeabi-v7a, armeabi-v7a-neon, x86_64
+apply_minimal_config android
+write_source_notice android
+
+echo "🔨 Building (30-60 minutes from scratch; see $BUILD_DIR/ffmpeg-kit/build.log)..."
+
+# x86 (32-bit) is emulator-only and rarely used.
 ./android.sh \
     --enable-libvpx \
     --disable-x86
 
-# Find and copy the built AAR
-echo ""
-echo "📦 Copying AAR to output directory..."
-
-AAR_PATH=$(find ./prebuilt -name "ffmpeg-kit*.aar" -type f 2>/dev/null | head -1)
-
-if [ -z "$AAR_PATH" ]; then
-    # Try alternative locations
-    AAR_PATH=$(find . -path "*/outputs/aar/*.aar" -type f 2>/dev/null | head -1)
-fi
-
-if [ -n "$AAR_PATH" ]; then
-    cp "$AAR_PATH" "$OUTPUT_DIR/ffmpegkit.aar"
-    echo "✅ Built: $OUTPUT_DIR/ffmpegkit.aar"
-    echo "   Size: $(du -h "$OUTPUT_DIR/ffmpegkit.aar" | cut -f1)"
-else
-    echo "❌ Error: Could not find built AAR"
-    echo "Looking for AAR files..."
-    find . -name "*.aar" -type f 2>/dev/null | head -10
+AAR_PATH="prebuilt/bundle-android-aar/ffmpeg-kit/ffmpeg-kit.aar"
+if [ ! -f "$AAR_PATH" ]; then
+    echo "❌ Build output not found: $AAR_PATH"
+    find prebuilt -name "*.aar" -type f 2>/dev/null | head -10
     exit 1
 fi
+cp "$AAR_PATH" "$OUTPUT_DIR/ffmpegkit.aar"
 
 echo ""
-echo "========================================"
-echo "✅ Android FFmpegKit build complete!"
-echo "========================================"
+echo "🔍 Checking 16 KB page alignment of the 64-bit libraries..."
+READELF="$(ls "$ANDROID_NDK_HOME"/toolchains/llvm/prebuilt/*/bin/llvm-readelf | head -1)"
+CHECK_DIR="$(mktemp -d)"
+unzip -q "$OUTPUT_DIR/ffmpegkit.aar" 'jni/arm64-v8a/*' 'jni/x86_64/*' -d "$CHECK_DIR"
+MISALIGNED=0
+for so in "$CHECK_DIR"/jni/*/*.so; do
+    if "$READELF" -lW "$so" | awk '$1 == "LOAD" { print $NF }' | grep -qv '0x4000'; then
+        echo "  ❌ $(basename "$(dirname "$so")")/$(basename "$so")"
+        MISALIGNED=1
+    fi
+done
+rm -rf "$CHECK_DIR"
+if [ "$MISALIGNED" = 1 ]; then
+    echo "Some libraries are not 16 KB aligned; build with NDK r28 or newer."
+    exit 1
+fi
+echo "  ✔ all aligned"
+
 echo ""
-echo "AAR location: $OUTPUT_DIR/ffmpegkit.aar"
-echo ""
-echo "Architectures:"
-echo "  - arm64-v8a"
-echo "  - armeabi-v7a"
-echo "  - x86_64"
-echo ""
-echo "To use this AAR instead of Maven dependency:"
-echo "1. In android/build.gradle, comment out the Maven dependency"
-echo "2. Uncomment: implementation fileTree(dir: 'libs', include: ['*.aar'])"
-echo ""
+echo "✅ $OUTPUT_DIR/ffmpegkit.aar ($(du -h "$OUTPUT_DIR/ffmpegkit.aar" | cut -f1))"

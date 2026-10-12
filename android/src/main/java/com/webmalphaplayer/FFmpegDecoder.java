@@ -51,7 +51,7 @@ final class FFmpegDecoder {
         try (FFmpegInput input = FFmpegInput.open(context, source)) {
             // libvpx-vp9 is the decoder that reads the alpha plane; FFmpeg's native vp9 ignores it.
             FFmpegSession session = FFmpegKit.execute(
-                "-c:v libvpx-vp9 -i " + quote(input.argument()) + " " + outputOptions + " "
+                "-c:v libvpx-vp9 -i " + quote(input.argument()) + " -an " + outputOptions + " "
                     + quote(output.getAbsolutePath()));
             if (!ReturnCode.isSuccess(session.getReturnCode())) {
                 throw new IOException("FFmpeg decode failed: " + tail(session.getOutput()));

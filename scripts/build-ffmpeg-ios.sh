@@ -1,8 +1,13 @@
 #!/bin/bash
 #
 # build-ffmpeg-ios.sh
-# Builds FFmpegKit for iOS with VP9 (libvpx)
-# Produces static XCFrameworks (App Store compatible)
+# Builds the minimal VP9 FFmpegKit (see ffmpegkit-common.sh for what's in it) as XCFrameworks
+# and copies them to ios/Frameworks.
+#
+# They are dynamic frameworks: ffmpeg-kit always builds FFmpeg shared on Apple platforms. That
+# suits the LGPL, since an app's users can swap them. Apps embed them (CocoaPods does this).
+#
+# Slices: iOS device arm64, simulator arm64 + x86_64. CLEAN=1 starts from scratch.
 #
 
 set -euo pipefail
@@ -11,8 +16,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 BUILD_DIR="$SCRIPT_DIR/build/ios"
 OUTPUT_DIR="$PROJECT_DIR/ios/Frameworks"
-export FFMPEG_KIT_XCFRAMEWORK_STATIC=1
 
+source "$SCRIPT_DIR/ffmpegkit-common.sh"
 
 echo "========================================"
 echo "Building FFmpegKit for iOS (VP9 only)"
@@ -21,7 +26,6 @@ echo "Build dir : $BUILD_DIR"
 echo "Output dir: $OUTPUT_DIR"
 echo ""
 
-# Check for Xcode
 if ! xcode-select -p &> /dev/null; then
     echo "❌ Xcode command line tools not found"
     echo "   Run: xcode-select --install"
@@ -31,46 +35,31 @@ fi
 mkdir -p "$BUILD_DIR" "$OUTPUT_DIR"
 cd "$BUILD_DIR"
 
-# Clone FFmpegKit if needed
-if [ ! -d "ffmpeg-kit" ]; then
-    echo "📥 Cloning FFmpegKit..."
-    git clone --depth 1 https://github.com/arthenica/ffmpeg-kit.git
-fi
-
+checkout_ffmpeg_kit
 cd ffmpeg-kit
 
-# Optional clean rebuild
 if [ "${CLEAN:-0}" = "1" ]; then
     echo "🧹 Cleaning previous build..."
     rm -rf prebuilt .tmp
 fi
 
-echo ""
-echo "🔨 Building FFmpegKit..."
-echo ""
-echo "Configuration:"
-echo "  - VP9 decoder: libvpx"
-echo "  - Static XCFrameworks"
-echo "  - iOS device: arm64"
-echo "  - iOS simulator: arm64, x86_64"
-echo ""
+apply_minimal_config apple
+write_source_notice apple
 
-# Build static XCFrameworks (DEFAULT behaviour)
+echo "🔨 Building (see $BUILD_DIR/ffmpeg-kit/build.log)..."
+
 ./ios.sh \
   --enable-libvpx \
   --disable-armv7 \
   --disable-armv7s \
+  --disable-arm64e \
   --disable-arm64-mac-catalyst \
   --disable-x86-64-mac-catalyst \
   --xcframework
 
-# Copy XCFrameworks
-echo ""
-echo "📦 Copying XCFrameworks..."
-
 FRAMEWORK_DIR="prebuilt/bundle-apple-xcframework-ios"
 
-EXPECTED_FRAMEWORKS=(
+FRAMEWORKS=(
     "ffmpegkit.xcframework"
     "libavcodec.xcframework"
     "libavformat.xcframework"
@@ -88,39 +77,14 @@ if [ ! -d "$FRAMEWORK_DIR" ]; then
 fi
 
 rm -rf "$OUTPUT_DIR"/*.xcframework
-
-for fw in "${EXPECTED_FRAMEWORKS[@]}"; do
-    if [ -d "$FRAMEWORK_DIR/$fw" ]; then
-        echo "  ✔ $fw"
-        cp -R "$FRAMEWORK_DIR/$fw" "$OUTPUT_DIR/"
-    else
-        echo "  ⚠️  Missing (optional): $fw"
+for fw in "${FRAMEWORKS[@]}"; do
+    if [ ! -d "$FRAMEWORK_DIR/$fw" ]; then
+        echo "❌ Missing: $fw"
+        exit 1
     fi
+    cp -R "$FRAMEWORK_DIR/$fw" "$OUTPUT_DIR/"
 done
 
 echo ""
-echo "🔍 Verifying static linkage..."
-
-BIN="$OUTPUT_DIR/ffmpegkit.xcframework/ios-arm64/ffmpegkit.framework/ffmpegkit"
-if otool -L "$BIN" | grep -E "libav|libvpx" >/dev/null; then
-  echo "❌ ERROR: Dynamic FFmpeg dependency found"
-else
-  echo "✔ Static FFmpeg linkage confirmed"
-fi
-
-echo ""
-echo "========================================"
-echo "✅ FFmpegKit iOS static build complete"
-echo "========================================"
-echo ""
-echo "Frameworks installed at:"
-echo "  $OUTPUT_DIR"
-echo ""
-echo "XCFrameworks:"
-ls -1 "$OUTPUT_DIR"/*.xcframework | xargs -n1 basename
-echo ""
-echo "ℹ️  Xcode:"
-echo "   - Add frameworks"
-echo "   - Do NOT embed"
-echo "   - ENABLE_BITCODE = NO"
-echo ""
+echo "✅ $OUTPUT_DIR ($(du -sh "$OUTPUT_DIR" | cut -f1))"
+ls -1 "$OUTPUT_DIR"
