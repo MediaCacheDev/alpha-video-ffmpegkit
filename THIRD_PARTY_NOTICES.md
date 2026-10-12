@@ -4,8 +4,8 @@ The code in this repository is MIT-licensed (see `LICENSE`). The FFmpegKit binar
 
 | Component | Version | Licence | Where |
 |---|---|---|---|
-| [FFmpegKit](https://github.com/arthenica/ffmpeg-kit) | commit `1036d3c` | LGPL-3.0 | iOS: `ffmpegkit.xcframework` in the `ffmpegkit-vp9` pod; Android: `dev.mediacache:ffmpegkit-vp9` |
-| [FFmpeg](https://ffmpeg.org) (arthenica's fork, tag `n6.0`) | 6.0 | LGPL-3.0-or-later | iOS: `lib*.xcframework` in the `ffmpegkit-vp9` pod; inside `dev.mediacache:ffmpegkit-vp9` |
+| [FFmpegKit](https://github.com/arthenica/ffmpeg-kit) | commit `1036d3c` | LGPL-3.0 | iOS: `ffmpegkit.xcframework` from the `ffmpegkit-vp9` pod or Swift package; Android: `dev.mediacache:ffmpegkit-vp9` |
+| [FFmpeg](https://ffmpeg.org) (arthenica's fork, tag `n6.0`) | 6.0 | LGPL-3.0-or-later | iOS: `lib*.xcframework` from the `ffmpegkit-vp9` pod or Swift package; inside `dev.mediacache:ffmpegkit-vp9` |
 | [libvpx](https://chromium.googlesource.com/webm/libvpx) (arthenica's fork, tag `v1.13.0`) | 1.13.0 | BSD-3-Clause, plus the WebM patent grant | linked into libavcodec |
 | [cpu_features](https://github.com/google/cpu_features) (arthenica's fork, tag `v0.8.0`) | 0.8.0 | Apache-2.0 | Android only, linked into the FFmpegKit libraries |
 

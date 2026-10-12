@@ -1,42 +1,49 @@
 {
-  "name": "react-native-webm-alpha-player-js",
+  "name": "react-native-alpha-video-ffmpegkit",
   "version": "1.0.0",
-  "description": "React Native WebM VP9+Alpha video player using Java/Swift with FFmpegKit",
-  "main": "src/index.js",
-  "types": "src/index.d.ts",
+  "description": "Transparent video for React Native: VP9 WebM with alpha on iOS and Android, decoded by FFmpegKit from plain Java and Swift, drawn with Metal / OpenGL ES or as bitmaps. Falls back to <video> on the web.",
+  "main": "react-native/src/index.js",
+  "types": "react-native/src/index.d.ts",
   "files": [
-    "src",
-    "android/src",
-    "android/build.gradle",
+    "react-native",
     "ios",
+    "android/src",
     "react-native.config.js",
-    "react-native-webm-alpha-player-js.podspec",
+    "react-native-alpha-video-ffmpegkit.podspec",
     "README.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
-    "licenses"
+    "licenses",
+    "!react-native/android/build",
+    "!react-native/android/.gradle",
+    "!ios/build",
+    "!.DS_Store"
   ],
   "scripts": {
-    "prepack": "echo 'Packing react-native-webm-alpha-player-js...'"
+    "publish:android:local": "scripts/publish-android.sh local"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/danielkpl2/react-native-webm-alpha-player-js"
+    "url": "https://github.com/danielkpl2/alpha-video-ffmpegkit"
   },
+  "homepage": "https://github.com/danielkpl2/alpha-video-ffmpegkit#readme",
   "keywords": [
     "react-native",
+    "alpha",
+    "transparent-video",
+    "transparency",
     "webm",
     "vp9",
-    "alpha",
     "video",
-    "transparent",
     "ffmpeg",
-    "ffmpegkit"
+    "ffmpegkit",
+    "ios",
+    "android"
   ],
   "author": "Daniel Kasprowicz",
   "license": "MIT",
   "peerDependencies": {
     "react": ">=17.0.0",
-    "react-native": ">=0.68.0"
+    "react-native": ">=0.71.0"
   }
 }

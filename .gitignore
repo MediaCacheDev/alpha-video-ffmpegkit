@@ -6,6 +6,12 @@ node_modules/
 android/build/
 android/.gradle/
 android/.cxx/
+android/local.properties
+react-native/android/build/
+react-native/android/.gradle/
+.build/
+.swiftpm/
+Package.resolved
 ios/build/
 # Local backups and experiments
 *.old

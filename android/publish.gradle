@@ -1,0 +1,69 @@
+// Maven publication for dev.mediacache:alpha-video-ffmpegkit. Run it through
+// scripts/publish-android.sh.
+//
+// Signing reads ORG_GRADLE_PROJECT_signingInMemoryKey (armored secret key), …KeyPassword and
+// optionally …KeyId. Without a key the artifacts are left unsigned, which is enough for
+// publishToMavenLocal.
+
+apply plugin: 'maven-publish'
+apply plugin: 'signing'
+
+def repoUrl = 'https://github.com/danielkpl2/alpha-video-ffmpegkit'
+
+afterEvaluate {
+    publishing {
+        publications {
+            release(MavenPublication) {
+                from components.release
+                artifactId = 'alpha-video-ffmpegkit'
+
+                pom {
+                    name = 'alpha-video-ffmpegkit'
+                    description = 'Transparent video for Android: VP9 WebM with alpha, decoded by FFmpegKit (libvpx) and drawn into a TextureView with OpenGL ES or a Bitmap.'
+                    url = repoUrl
+                    inceptionYear = '2026'
+                    licenses {
+                        license {
+                            name = 'MIT'
+                            url = 'https://opensource.org/licenses/MIT'
+                            distribution = 'repo'
+                        }
+                    }
+                    developers {
+                        developer {
+                            id = 'danielkpl2'
+                            name = 'Daniel Kasprowicz'
+                            email = '9932671+danielkpl2@users.noreply.github.com'
+                            url = 'https://github.com/danielkpl2'
+                        }
+                    }
+                    scm {
+                        connection = "scm:git:${repoUrl}.git"
+                        developerConnection = "scm:git:${repoUrl}.git"
+                        url = repoUrl
+                    }
+                }
+            }
+        }
+        repositories {
+            maven {
+                name = 'staging'
+                url = layout.buildDirectory.dir('staging-repo')
+            }
+        }
+    }
+
+    def signingKey = findProperty('signingInMemoryKey')
+    if (signingKey) {
+        signing {
+            def keyId = findProperty('signingInMemoryKeyId')
+            def password = findProperty('signingInMemoryKeyPassword')
+            if (keyId) {
+                useInMemoryPgpKeys(keyId, signingKey, password)
+            } else {
+                useInMemoryPgpKeys(signingKey, password)
+            }
+            sign publishing.publications.release
+        }
+    }
+}

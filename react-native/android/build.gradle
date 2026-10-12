@@ -1,0 +1,44 @@
+// The React Native package's Android module. It compiles the standalone library's sources
+// (../../android) together with the React Native glue, because autolinking adds only this one
+// Gradle project to the app.
+
+apply plugin: 'com.android.library'
+
+def safeExtGet(name, fallback) {
+    return rootProject.ext.has(name) ? rootProject.ext.get(name) : fallback
+}
+
+def coreDir = file('../../android')
+
+android {
+    namespace 'dev.mediacache.alphavideo.ffmpegkit.reactnative'
+    compileSdk safeExtGet('compileSdkVersion', 36)
+
+    defaultConfig {
+        // FFmpegKit 6.0 needs API 24
+        minSdk safeExtGet('minSdkVersion', 24)
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main {
+            java.srcDirs = ['src/main/java', "${coreDir}/src/main/java"]
+        }
+    }
+}
+
+repositories {
+    google()
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'com.facebook.react:react-android'
+    // FFmpegKit with a VP9-only FFmpeg (github.com/MediaCacheDev/ffmpegkit-vp9). Brings in
+    // com.arthenica:smart-exception-java through its POM.
+    implementation 'dev.mediacache:ffmpegkit-vp9:6.0.0'
+}

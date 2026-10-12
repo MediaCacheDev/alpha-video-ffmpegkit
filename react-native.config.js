@@ -1,13 +1,11 @@
 module.exports = {
   dependency: {
     platforms: {
+      ios: {},
       android: {
-        sourceDir: './android',
-        packageImportPath: 'import com.webmalphaplayer.WebMAlphaPlayerPackage;',
-        packageInstance: 'new WebMAlphaPlayerPackage()',
-      },
-      ios: {
-        project: './ios',
+        sourceDir: './react-native/android',
+        packageImportPath: 'import dev.mediacache.alphavideo.ffmpegkit.reactnative.FFmpegKitAlphaPackage;',
+        packageInstance: 'new FFmpegKitAlphaPackage()',
       },
     },
   },

@@ -1,12 +1,18 @@
-# react-native-webm-alpha-player-js
+# alpha-video-ffmpegkit
 
-A React Native library for playing VP9+Alpha WebM videos with transparency support, decoding with [FFmpegKit](https://github.com/arthenica/ffmpeg-kit) from plain Java and Swift.
+Plays VP9 WebM videos with an alpha channel (transparent video) on Android and iOS, decoding with [FFmpegKit](https://github.com/arthenica/ffmpeg-kit) from plain Java and Swift. It comes as a React Native component and as standalone Android and iOS libraries.
+
+| Platform | Package | Views |
+|---|---|---|
+| React Native (Android, iOS, web) | npm `react-native-alpha-video-ffmpegkit` | `FFmpegKitAlphaView`, `FFmpegKitAlphaGPUView`, `FFmpegKitAlphaCPUView` |
+| Android | Maven `dev.mediacache:alpha-video-ffmpegkit` | `dev.mediacache.alphavideo.ffmpegkit.FFmpegKitAlphaGPUView`, `…FFmpegKitAlphaCPUView` |
+| iOS | Swift Package Manager, product `AlphaVideoFFmpegKit` | `FFmpegKitAlphaGPUView`, `FFmpegKitAlphaCPUView` |
 
 By default clips are decoded while they play, a few frames ahead, so memory stays flat however long the clip is. `mode="preload"` decodes every frame first instead, which suits short clips that loop for a long time (see [Playback modes](#playback-modes)).
 
-This was the first attempt, and it stays as a reference implementation: the whole player is plain Java and Swift around FFmpeg command lines. For production, use [react-native-webm-alpha-player](https://github.com/danielkpl2/react-native-webm-alpha-player), which shares a C++ decoder between platforms:
+This was the first attempt, and it stays as a reference implementation: the whole player is plain Java and Swift around FFmpeg command lines. For production, use [alpha-video](https://github.com/danielkpl2/alpha-video), which shares a C++ decoder between platforms:
 
-| | this package | react-native-webm-alpha-player |
+| | this package | alpha-video |
 |---|---|---|
 | Decoding | FFmpegKit command line, to raw frames | libvpx through FFmpeg's API, in process |
 | Playback | stream or preload | stream, preload or both |
@@ -24,38 +30,82 @@ This was the first attempt, and it stays as a reference implementation: the whol
 
 ## Installation
 
-```bash
-npm install react-native-webm-alpha-player-js
-# or
-yarn add react-native-webm-alpha-player-js
-```
-
-### iOS Setup
+### React Native
 
 ```bash
+npm install react-native-alpha-video-ffmpegkit
 cd ios && pod install
 ```
 
-The podspec depends on the `ffmpegkit-vp9` 6.0.0 pod from CocoaPods trunk, a minimal FFmpegKit build. Its XCFrameworks are dynamic, and CocoaPods embeds them in the app.
+On iOS the podspec depends on the `ffmpegkit-vp9` 6.0.0 pod from CocoaPods trunk, a minimal FFmpegKit build. Its XCFrameworks are dynamic, and CocoaPods embeds them in the app.
 
-### Android Setup
+On Android the library depends on `dev.mediacache:ffmpegkit-vp9:6.0.0` from Maven Central, the same minimal build with the `com.arthenica.ffmpegkit` API (FFmpegKit's own binaries are no longer published). It needs `minSdkVersion` 24.
 
-FFmpegKit's own binaries are no longer published. The library depends on `dev.mediacache:ffmpegkit-vp9:6.0.0` from Maven Central, a minimal FFmpegKit build with the same `com.arthenica.ffmpegkit` API. It needs `minSdkVersion` 24.
+### Android without React Native
 
-## FFmpegKit build
+```gradle
+dependencies {
+    implementation 'dev.mediacache:alpha-video-ffmpegkit:1.0.0'
+}
+```
 
-Both platforms use [ffmpegkit-vp9](https://github.com/MediaCacheDev/ffmpegkit-vp9): the archived [arthenica/ffmpeg-kit](https://github.com/arthenica/ffmpeg-kit) at a fixed commit (FFmpeg 6.0, libvpx 1.13.0), configured with `--disable-everything` plus what the player needs: the WebM demuxer, the libvpx VP9 decoder, rawvideo output, the file and pipe protocols, and a few filters. It is about 4 MB for Android (four ABIs) and 11 MB for iOS, against 31 MB and 60 MB for a default `--enable-libvpx` build. Its build scripts, notices and sources are in that repository.
+`FFmpegKitAlphaGPUView` (OpenGL ES) and `FFmpegKitAlphaCPUView` (Bitmap) are `TextureView`s in `dev.mediacache.alphavideo.ffmpegkit`. They take the same sources and options as the React Native component, through setters:
+
+```kotlin
+val view = FFmpegKitAlphaGPUView(context)
+view.setMode("preload")
+view.setCallback(object : PlayerCallback {
+    override fun onLoad(totalFrames: Int, width: Int, height: Int) {}
+    override fun onError(error: String) {}
+    override fun onEnd() {}
+})
+view.setSource("asset://videos/glow.webm")
+container.addView(view)
+```
+
+Playback starts once the view's surface exists. Detaching the view stops it, and attaching it again starts it over. Callbacks arrive on the main thread. http(s) sources need the `INTERNET` permission in the app's manifest. Needs `minSdk` 24.
+
+### iOS without React Native
+
+In Xcode, add the package `https://github.com/danielkpl2/alpha-video-ffmpegkit` (File → Add Package Dependencies), or in `Package.swift`:
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/danielkpl2/alpha-video-ffmpegkit", exact: "1.0.0"),
+],
+targets: [
+    .target(name: "MyApp", dependencies: [
+        .product(name: "AlphaVideoFFmpegKit", package: "alpha-video-ffmpegkit"),
+    ]),
+]
+```
+
+It pulls in [ffmpegkit-vp9](https://github.com/MediaCacheDev/ffmpegkit-vp9) 6.0.0 as dynamic XCFrameworks, which Xcode embeds in the app.
+
+```swift
+import AlphaVideoFFmpegKit
+
+let view = FFmpegKitAlphaGPUView(frame: CGRect(x: 0, y: 0, width: 200, height: 200))
+view.mode = "preload"
+view.onLoad = { totalFrames, width, height in }
+view.onError = { error in }
+view.onEnd = { }
+view.source = "asset://videos/glow.webm"
+container.addSubview(view)
+```
+
+Playback starts on the next main-queue turn after `source` is set, so the other properties can be set before or after it. Closures are called on the main queue. `FFmpegKitAlphaCPUView` has the same properties. iOS 13 or later.
 
 ## Usage
 
 ### Basic Usage (GPU-accelerated, recommended)
 
 ```jsx
-import { WebMAlphaView } from 'react-native-webm-alpha-player-js';
+import { FFmpegKitAlphaView } from 'react-native-alpha-video-ffmpegkit';
 
 function MyComponent() {
   return (
-    <WebMAlphaView
+    <FFmpegKitAlphaView
       source={{ uri: 'https://example.com/animation.webm' }}
       style={{ width: 200, height: 200 }}
       onLoad={({ totalFrames, width, height }) => console.log(totalFrames, width, height)}
@@ -68,11 +118,11 @@ function MyComponent() {
 ### CPU Mode (simpler, more compatible)
 
 ```jsx
-import { WebMAlphaView } from 'react-native-webm-alpha-player-js';
+import { FFmpegKitAlphaView } from 'react-native-alpha-video-ffmpegkit';
 
 function MyComponent() {
   return (
-    <WebMAlphaView
+    <FFmpegKitAlphaView
       source={{ uri: 'https://example.com/animation.webm' }}
       useGPU={false}
       style={{ width: 200, height: 200 }}
@@ -84,7 +134,7 @@ function MyComponent() {
 ### With Playback Controls
 
 ```jsx
-import { WebMAlphaView } from 'react-native-webm-alpha-player-js';
+import { FFmpegKitAlphaView } from 'react-native-alpha-video-ffmpegkit';
 import { useState } from 'react';
 
 function MyComponent() {
@@ -92,7 +142,7 @@ function MyComponent() {
 
   return (
     <>
-      <WebMAlphaView
+      <FFmpegKitAlphaView
         source={{ uri: 'https://example.com/animation.webm' }}
         autoPlay={true}
         loop={true}
@@ -112,10 +162,10 @@ function MyComponent() {
 
 ```jsx
 // Use GPU view directly
-import { WebMAlphaGPUView } from 'react-native-webm-alpha-player-js';
+import { FFmpegKitAlphaGPUView } from 'react-native-alpha-video-ffmpegkit';
 
 // Use CPU view directly
-import { WebMAlphaCPUView } from 'react-native-webm-alpha-player-js';
+import { FFmpegKitAlphaCPUView } from 'react-native-alpha-video-ffmpegkit';
 ```
 
 ## Sources
@@ -145,7 +195,7 @@ Downloads only count as successful on HTTP 200. Without a `cacheKey` the file is
 | `autoPlay` | `boolean` | `true` | Start playing automatically |
 | `loop` | `boolean` | `true` | Loop the animation |
 | `paused` | `boolean` | `false` | Pause the animation |
-| `useGPU` | `boolean` | `true` | Use GPU acceleration (`WebMAlphaView` only) |
+| `useGPU` | `boolean` | `true` | Use GPU acceleration (`FFmpegKitAlphaView` only) |
 | `mode` | `'stream'` \| `'preload'` | `'stream'` | See [Playback modes](#playback-modes). Changing it restarts playback. Ignored on web |
 | `streamBufferFrames` | `number` | `15` | Frames decoded ahead in stream mode. Applies from the next start |
 | `verbose` | `boolean` | `false` | Log progress to logcat / the iOS console. Errors are always logged |
@@ -173,7 +223,7 @@ In both modes an http(s) source is downloaded in full before decoding starts. Fr
 |---|---|---|
 | Android CPU | RAM `W×H×4×streamBufferFrames` | Disk `W×H×4×frames` (raw RGBA file in the cache directory, read a frame at a time) |
 | Android GPU | RAM `W×H×2.5×streamBufferFrames`, plus one set of textures | GPU memory `W×H×2.5×frames` |
-| iOS CPU | RAM `W×H×4×streamBufferFrames` | RAM `W×H×4×frames` (shared `NSCache`, up to 100 MB) |
+| iOS CPU | RAM `W×H×4×streamBufferFrames` | RAM `W×H×4×frames` (shared `NSCache`, up to an eighth of the device's memory) |
 | iOS GPU | RAM `W×H×2.5×streamBufferFrames`, plus three sets of textures | Metal textures `W×H×2.5×frames` (shared cache) |
 
 A 1080×1080 clip of 90 frames is about 400 MB as RGBA when preloaded; streamed with the default 15 frames, it's about 70 MB however many frames it has.
@@ -215,7 +265,7 @@ ffmpeg -i input.mp4 -vf "chromakey=0x00ff00:0.1:0.2" -c:v libvpx-vp9 -pix_fmt yu
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                    React Native                         │
-│                   WebMAlphaView                         │
+│                 FFmpegKitAlphaView                      │
 │              (useGPU prop selects mode)                 │
 └─────────────────────────────────────────────────────────┘
                            │
@@ -234,9 +284,22 @@ ffmpeg -i input.mp4 -vf "chromakey=0x00ff00:0.1:0.2" -c:v libvpx-vp9 -pix_fmt yu
 └─────────────────────────┘   └─────────────────────────┘
 ```
 
+## FFmpegKit build
+
+Both platforms use [ffmpegkit-vp9](https://github.com/MediaCacheDev/ffmpegkit-vp9): the archived [arthenica/ffmpeg-kit](https://github.com/arthenica/ffmpeg-kit) at a fixed commit (FFmpeg 6.0, libvpx 1.13.0), configured with `--disable-everything` plus what the player needs: the WebM demuxer, the libvpx VP9 decoder, rawvideo output, the file and pipe protocols, and a few filters. It is about 4 MB for Android (four ABIs) and 11 MB for iOS, against 31 MB and 60 MB for a default `--enable-libvpx` build. Its build scripts, notices and sources are in that repository.
+
+## Repository layout
+
+| Path | What | Package |
+|---|---|---|
+| `android/` | The Android library: the two views, `PlayerCallback`, source loading, the FFmpegKit pipes. Builds on its own (`./gradlew` in that folder) | `dev.mediacache:alpha-video-ffmpegkit` |
+| `ios/Sources/AlphaVideoFFmpegKit/` | The iOS library: the two views and source loading | SwiftPM `AlphaVideoFFmpegKit` (`Package.swift`) |
+| `react-native/` | `src/` (the components), `android/` (view managers; its Gradle module compiles `android/` too), `ios/` (subclasses of the iOS views with React props) | npm `react-native-alpha-video-ffmpegkit` (`package.json`, `react-native-alpha-video-ffmpegkit.podspec`) |
+| `scripts/publish-android.sh` | `local` publishes the Android library to `~/.m2`; `central` signs it and uploads it to the Maven Central Portal (see the script for the variables) | |
+
 ## Requirements
 
-- React Native 0.70+
+- React Native 0.71+
 - Android: minSdkVersion 24; compileSdkVersion and targetSdkVersion come from the app (default 36)
 - iOS: iOS 13.0+
 

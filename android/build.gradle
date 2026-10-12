@@ -1,43 +1,47 @@
-buildscript {
-    repositories {
-        google()
-        mavenCentral()
-    }
+// dev.mediacache:alpha-video-ffmpegkit, the Android library on its own (no React Native).
+// The React Native package builds these same sources from react-native/android/build.gradle.
 
-    dependencies {
-        classpath 'com.android.tools.build:gradle:7.4.2'
+buildscript {
+    // Only when this directory is built on its own; inside an app, the app's plugin is used.
+    if (project == rootProject) {
+        repositories {
+            google()
+            mavenCentral()
+        }
+        dependencies {
+            classpath 'com.android.tools.build:gradle:8.12.0'
+        }
     }
 }
 
 apply plugin: 'com.android.library'
 
-def safeExtGet(prop, fallback) {
-    rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+def safeExtGet(name, fallback) {
+    return rootProject.ext.has(name) ? rootProject.ext.get(name) : fallback
 }
 
+group = 'dev.mediacache'
+version = '1.0.0'
+
 android {
-    namespace "com.webmalphaplayer"
-    compileSdkVersion safeExtGet('compileSdkVersion', 36)
-    
+    namespace 'dev.mediacache.alphavideo.ffmpegkit'
+    compileSdk safeExtGet('compileSdkVersion', 36)
+
     defaultConfig {
         // FFmpegKit 6.0 needs API 24
-        minSdkVersion safeExtGet('minSdkVersion', 24)
-        targetSdkVersion safeExtGet('targetSdkVersion', 36)
+        minSdk safeExtGet('minSdkVersion', 24)
     }
-    
-    buildTypes {
-        release {
-            minifyEnabled false
-        }
-    }
-    
+
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
-    
-    lintOptions {
-        abortOnError false
+
+    publishing {
+        singleVariant('release') {
+            withSourcesJar()
+            withJavadocJar()
+        }
     }
 }
 
@@ -47,9 +51,12 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.facebook.react:react-native:+'
-    
+    implementation 'androidx.annotation:annotation:1.9.1'
     // FFmpegKit with a VP9-only FFmpeg (github.com/MediaCacheDev/ffmpegkit-vp9). Brings in
     // com.arthenica:smart-exception-java through its POM.
     implementation 'dev.mediacache:ffmpegkit-vp9:6.0.0'
+}
+
+if (project == rootProject) {
+    apply from: 'publish.gradle'
 }
