@@ -32,27 +32,6 @@ private class FrameCacheEntry {
     }
 }
 
-/// Paces stream-mode playback at the clip's frame rate. If the decoder falls more than a frame
-/// behind, the clock restarts from now instead of rushing through frames to catch up.
-private struct FrameClock {
-    private let interval: CFTimeInterval
-    private var next: CFTimeInterval
-
-    init(frameRate: Double) {
-        interval = 1.0 / frameRate
-        next = CACurrentMediaTime() + interval
-    }
-
-    /// Sleeps until the next frame is due.
-    mutating func awaitNextFrame() {
-        let now = CACurrentMediaTime()
-        if now - next > interval { next = now }
-        let sleep = next - now
-        next += interval
-        if sleep > 0 { Thread.sleep(forTimeInterval: sleep) }
-    }
-}
-
 // Configure cache limits
 private func configureFrameCache() {
     frameCache.countLimit = 10 // Max 10 videos cached
@@ -76,13 +55,11 @@ public class FFmpegKitAlphaCPUView: UIView {
     /// Name for the downloaded copy of an http(s) source, relative to Caches; it must stay inside
     /// that directory. Also names the decoded-frame cache, which views showing the same clip share.
     @objc public var cacheKey: String?
-    @objc public var autoPlay: Bool = true {
-        didSet { updatePlaybackState() }
-    }
+    /// Off: the first frame shows and stays until this turns on.
+    @objc public var autoPlay: Bool = true
     @objc public var loop: Bool = true
-    @objc public var paused: Bool = false {
-        didSet { updatePlaybackState() }
-    }
+    /// Holds the current frame; playback carries on from it when unpaused.
+    @objc public var paused: Bool = false
     /// Log progress. Errors are always logged.
     @objc public var verbose: Bool = false
     /// `"stream"` (the default, also for nil) or `"preload"`; changing it restarts playback.
@@ -110,11 +87,13 @@ public class FFmpegKitAlphaCPUView: UIView {
     }
     private var stream: Bool { mode != "preload" }
 
-    private var isPlaying = false
+    /// Loaded: the playback queue shows the clip, playing or paused, until it's stopped.
+    private var isRunning = false
     private var isDecoding = false
     private var shouldStop = false
-    /// Bumped by every start, so work left over from an earlier source or pause stops itself.
+    /// Bumped by every start, so work left over from an earlier source stops itself.
     private var generation = 0
+    private var playhead: Playhead?
 
     private var playbackQueue: DispatchQueue?
 
@@ -186,8 +165,21 @@ public class FFmpegKitAlphaCPUView: UIView {
     
     private func cleanup() {
         shouldStop = true
-        isPlaying = false
+        isRunning = false
         isDecoding = false
+        playhead = nil
+    }
+
+    /// Shows a frame, clamped to the clip, and plays on from it unless paused. Ignored until
+    /// `onLoad`, and in stream mode when the container doesn't give a duration. A stream-mode
+    /// seek decodes again from the keyframe before the frame.
+    @objc public func seekToFrame(_ frame: Int) {
+        playhead?.seekToFrame(frame)
+    }
+
+    /// Seeks to the frame showing at `seconds`, as `seekToFrame`.
+    @objc public func seekToTime(_ seconds: Double) {
+        playhead?.seekToTime(seconds)
     }
     
     private func sourceChanged(from oldValue: String?) {
@@ -199,30 +191,33 @@ public class FFmpegKitAlphaCPUView: UIView {
     }
 
     private func modeChanged(from oldValue: String?) {
-        guard (oldValue != "preload") != stream, isPlaying || isDecoding else { return }
+        guard (oldValue != "preload") != stream, isRunning || isDecoding else { return }
         cleanup()
         startPlayback()
-    }
-
-    private func updatePlaybackState() {
-        if paused {
-            stopPlayback()
-        } else {
-            scheduleStart()
-        }
     }
 
     /// Starts on the next main-queue turn, once the properties set together with this change are in.
     private func scheduleStart() {
         DispatchQueue.main.async { [weak self] in
-            guard let self = self, self.autoPlay, !self.paused, !self.isPlaying, !self.isDecoding else { return }
+            guard let self = self, !self.isRunning, !self.isDecoding else { return }
             self.startPlayback()
         }
+    }
+
+    /// For the job started with `gen`; also becomes the target of seeks.
+    private func makePlayhead(gen: Int) -> Playhead {
+        let playhead = Playhead(
+            frameRate: frameRate,
+            playing: { [weak self] in self.map { $0.autoPlay && !$0.paused } ?? false },
+            loop: { [weak self] in self?.loop ?? false },
+            stopped: { [weak self] in self?.isStopped(gen) ?? true })
+        self.playhead = playhead
+        return playhead
     }
     
     private func startPlayback() {
         guard let source = source, let hash = sourceHash else { return }
-        if isPlaying || isDecoding { return }
+        if isRunning || isDecoding { return }
         
         shouldStop = false
         generation += 1
@@ -237,15 +232,15 @@ public class FFmpegKitAlphaCPUView: UIView {
         // Check if frames are already cached
         if let cached = frameCache.object(forKey: hash as NSString) {
             log("Using cached frames for \(hash.prefix(8))")
-            isPlaying = true
+            isRunning = true
             videoWidth = cached.width
             videoHeight = cached.height
             frameRate = cached.frameRate
-            emitLoad(frames: cached.frames.count, gen: gen)
+            let playhead = makePlayhead(gen: gen)
             playbackQueue?.async { [weak self] in
-                self?.playFramesFromCache(cached.frames, gen: gen)
+                self?.playFramesFromCache(cached.frames, playhead: playhead, gen: gen)
                 DispatchQueue.main.async {
-                    if self?.generation == gen { self?.isPlaying = false }
+                    if self?.generation == gen { self?.isRunning = false }
                 }
             }
             return
@@ -271,7 +266,8 @@ public class FFmpegKitAlphaCPUView: UIView {
     
     private func stopPlayback() {
         shouldStop = true
-        isPlaying = false
+        isRunning = false
+        playhead = nil
     }
     
     /// Downloads the source if it's remote and reads its size and frame rate. Nil after an
@@ -308,12 +304,14 @@ public class FFmpegKitAlphaCPUView: UIView {
                 guard self.generation == gen else { return }
                 self.isDecoding = false
                 guard let localPath = localPath, !self.isStopped(gen) else { return }
-                self.isPlaying = true
+                self.isRunning = true
                 let bufferFrames = self.streamBufferFrames
+                let playhead = self.makePlayhead(gen: gen)
                 self.playbackQueue?.async { [weak self] in
-                    self?.playStream(path: localPath, source: source, bufferFrames: bufferFrames, gen: gen)
+                    self?.playStream(path: localPath, source: source, bufferFrames: bufferFrames,
+                                     playhead: playhead, gen: gen)
                     DispatchQueue.main.async {
-                        if self?.generation == gen { self?.isPlaying = false }
+                        if self?.generation == gen { self?.isRunning = false }
                     }
                 }
             }
@@ -321,46 +319,36 @@ public class FFmpegKitAlphaCPUView: UIView {
     }
 
     /// onLoad comes with the first frame, and totalFrames is estimated from the duration.
-    private func playStream(path: String, source: String, bufferFrames: Int, gen: Int) {
-        let frames = FrameStream(
-            path: path, outputOptions: "-vf format=rgba -f rawvideo",
-            frameSize: videoWidth * videoHeight * 4, bufferFrames: bufferFrames,
-            loop: { [weak self] in self?.loop ?? false })
-        defer { frames.close() }
-
-        var clock = FrameClock(frameRate: frameRate)
-        var loaded = false
+    private func playStream(path: String, source: String, bufferFrames: Int, playhead: Playhead, gen: Int) {
+        let frameSize = videoWidth * videoHeight * 4
+        let estimatedFrames = Int((durationSeconds * frameRate).rounded())
         do {
-            while let frame = try frames.next(isCancelled: { [weak self] in self?.isStopped(gen) ?? true }) {
-                let image = autoreleasepool {
-                    createImage(from: Data(bytesNoCopy: frame.bytes, count: frame.count, deallocator: .none))
-                }
-                frames.recycle(frame)
-                if !loaded {
-                    emitLoad(frames: Int((durationSeconds * frameRate).rounded()), gen: gen)
-                    loaded = true
-                }
-                if let image = image {
-                    DispatchQueue.main.async { [weak self] in
-                        guard self?.isStopped(gen) == false else { return }
-                        self?.imageView.image = image
-                    }
-                }
-                clock.awaitNextFrame()
-            }
+            let decodedAny = try playhead.playStream(
+                estimatedFrames: estimatedFrames,
+                open: { startSeconds in
+                    FrameStream(
+                        path: path, outputOptions: "-vf format=rgba -f rawvideo",
+                        frameSize: frameSize, bufferFrames: bufferFrames, startSeconds: startSeconds,
+                        loop: { [weak self] in self?.loop ?? false })
+                },
+                show: { frame in
+                    show(autoreleasepool {
+                        createImage(from: Data(bytesNoCopy: frame.bytes, count: frame.count, deallocator: .none))
+                    }, gen: gen)
+                },
+                onLoad: { emitLoad(frames: estimatedFrames, gen: gen) },
+                onEnd: { emitEnd(gen: gen) })
+            if !decodedAny && !isStopped(gen) { emitError("No frames decoded from \(source)", gen: gen) }
         } catch {
             if !isStopped(gen) { emitError("Failed to decode \(source): \(error.localizedDescription)", gen: gen) }
-            return
         }
+    }
 
-        guard !isStopped(gen) else { return }
-        guard loaded else {
-            emitError("No frames decoded from \(source)", gen: gen)
-            return
-        }
+    private func show(_ image: UIImage?, gen: Int) {
+        guard let image = image else { return }
         DispatchQueue.main.async { [weak self] in
-            guard let self = self, self.generation == gen else { return }
-            self.onEnd?()
+            guard self?.isStopped(gen) == false else { return }
+            self?.imageView.image = image
         }
     }
     
@@ -427,56 +415,23 @@ public class FFmpegKitAlphaCPUView: UIView {
         // This frees up the shared FFmpeg queue for other videos to decode
         DispatchQueue.main.async { [weak self] in
             guard let self = self, !self.isStopped(gen) else { return }
-            self.isPlaying = true
-            self.emitLoad(frames: frames.count, gen: gen)
+            self.isRunning = true
+            let playhead = self.makePlayhead(gen: gen)
             self.playbackQueue?.async { [weak self] in
-                self?.playFramesFromCache(frames, gen: gen)
+                self?.playFramesFromCache(frames, playhead: playhead, gen: gen)
                 DispatchQueue.main.async {
-                    if self?.generation == gen { self?.isPlaying = false }
+                    if self?.generation == gen { self?.isRunning = false }
                 }
             }
         }
     }
     
-    private func playFramesFromCache(_ frames: [Data], gen: Int) {
-        let frameInterval: TimeInterval = 1.0 / frameRate
-        
-        repeat {
-            var frameIndex = 0
-            let startTime = CACurrentMediaTime()
-            
-            while !isStopped(gen) && frameIndex < frames.count {
-                autoreleasepool {
-                    let data = frames[frameIndex]
-                    
-                    // Convert RGBA to UIImage and display
-                    if let image = createImage(from: data) {
-                        DispatchQueue.main.async { [weak self] in
-                            guard self?.isStopped(gen) == false else { return }
-                            self?.imageView.image = image
-                        }
-                    }
-                    
-                    frameIndex += 1
-                    
-                    // Timing control
-                    let targetTime = startTime + (Double(frameIndex) * frameInterval)
-                    let sleepTime = targetTime - CACurrentMediaTime()
-                    
-                    if sleepTime > 0.001 { // > 1ms
-                        Thread.sleep(forTimeInterval: sleepTime)
-                    }
-                }
-            }
-            
-        } while loop && !isStopped(gen)
-        
-        if !isStopped(gen) {
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self, self.generation == gen else { return }
-                self.onEnd?()
-            }
-        }
+    private func playFramesFromCache(_ frames: [Data], playhead: Playhead, gen: Int) {
+        playhead.playPreloaded(
+            frames: frames.count,
+            show: { index in show(autoreleasepool { createImage(from: frames[index]) }, gen: gen) },
+            onLoad: { emitLoad(frames: frames.count, gen: gen) },
+            onEnd: { emitEnd(gen: gen) })
     }
     
     private func probeVideo(path: String) -> Bool {
@@ -567,6 +522,13 @@ public class FFmpegKitAlphaCPUView: UIView {
         }
     }
     
+    private func emitEnd(gen: Int) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.generation == gen else { return }
+            self.onEnd?()
+        }
+    }
+
     private func emitError(_ message: String, gen: Int) {
         NSLog("[FFmpegKitAlphaCPUView] %@", message)
         DispatchQueue.main.async { [weak self] in

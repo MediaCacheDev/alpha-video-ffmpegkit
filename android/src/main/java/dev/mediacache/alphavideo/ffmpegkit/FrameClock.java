@@ -1,8 +1,8 @@
 package dev.mediacache.alphavideo.ffmpegkit;
 
 /**
- * Paces stream-mode playback at the clip's frame rate. If the decoder falls more than a frame
- * behind, the clock restarts from now instead of rushing through frames to catch up.
+ * Paces playback at the clip's frame rate. If the decoder falls more than a frame behind, the
+ * clock restarts from now instead of rushing through frames to catch up.
  */
 final class FrameClock {
 
@@ -11,6 +11,11 @@ final class FrameClock {
 
     FrameClock(double frameRate) {
         intervalNs = (long) (1_000_000_000.0 / frameRate);
+        restart();
+    }
+
+    /** The next frame is due one interval from now, as after a pause or a seek. */
+    void restart() {
         nextNs = System.nanoTime() + intervalNs;
     }
 

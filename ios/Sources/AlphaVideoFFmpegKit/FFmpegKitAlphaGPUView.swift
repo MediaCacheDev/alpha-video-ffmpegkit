@@ -171,8 +171,10 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
     /// Name for the downloaded copy of an http(s) source, relative to Caches; it must stay inside
     /// that directory. Also names the texture cache, which views showing the same clip share.
     @objc public var cacheKey: String?
+    /// Off: the first frame shows and stays until `play()`.
     @objc public var autoPlay: Bool = true
     @objc public var loop: Bool = true
+    /// Holds the current frame; playback carries on from it when unpaused.
     @objc public var paused: Bool = false
     /// Log progress. Errors are always logged.
     @objc public var verbose: Bool = false
@@ -196,11 +198,18 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
     }
     private var stream: Bool { mode != "preload" }
 
-    private var isPlaying = false
+    /// Loaded: the display link shows the clip, playing or paused.
+    private var isRunning = false
     private var isDecoding = false
     private var shouldStop = false
-    /// Bumped by every play(), so a decode left over from an earlier source can't take over.
+    /// Bumped by every load, so a decode left over from an earlier source can't take over.
     private var generation = 0
+    private var playRequested = false
+    private var wasPlaying = false
+    /// A clip that doesn't loop played to its end; its last frame stays up.
+    private var ended = false
+    /// Frames a seek can reach: 0 until loaded. Estimated from the duration in stream mode.
+    private var seekableFrames = 0
 
     // CADisplayLink for frame-synchronized rendering
     private var displayLink: CADisplayLink?
@@ -216,10 +225,14 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
     // written isn't one the GPU may still be drawing.
     private static let streamTextureSets = 3
     private var frameStream: FrameStream?
+    /// Starts a new stream at a time in seconds, for seeks.
+    private var reopenStream: ((Double) -> FrameStream)?
     private var streamTextures: [PlaneTextures] = []
     private var nextStreamSet = 0
     private var currentStreamTextures: PlaneTextures?
     private var streamLoaded = false
+    /// The next stream frame shows even while paused: the first one, and each seek's.
+    private var streamFrameOwed = false
 
     // Video dimensions
     private var videoWidth: Int = 0
@@ -291,20 +304,56 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
         stop()
         guard source != nil else { return }
         DispatchQueue.main.async { [weak self] in
-            guard let self = self, self.autoPlay else { return }
-            self.play()
+            self?.load()
         }
     }
 
     private func modeChanged(from oldValue: String?) {
-        guard (oldValue != "preload") != stream, isPlaying || isDecoding else { return }
+        guard (oldValue != "preload") != stream, isRunning || isDecoding else { return }
+        let requested = playRequested
         stop()
-        play()
+        playRequested = requested
+        load()
     }
 
-    /// Starts playback of `source`; does nothing while it is already playing or decoding.
+    private var shouldPlay: Bool {
+        (autoPlay || playRequested) && !paused
+    }
+
+    /// Plays `source`, loading it first if needed. A clip that played to its end starts again.
     @objc public func play() {
-        guard !isPlaying, !isDecoding, let source = source, let hash = sourceHash else { return }
+        playRequested = true
+        if ended { seekToFrame(0) }
+        load()
+    }
+
+    /// Shows a frame, clamped to the clip, and plays on from it unless paused. Ignored until
+    /// `onLoad`, and in stream mode when the container doesn't give a duration. A stream-mode
+    /// seek decodes again from the keyframe before the frame.
+    @objc public func seekToFrame(_ frame: Int) {
+        guard isRunning, seekableFrames > 0 else { return }
+        let target = min(max(frame, 0), seekableFrames - 1)
+        ended = false
+        lastFrameTime = CACurrentMediaTime()
+        if let reopen = reopenStream {
+            frameStream?.close()
+            frameStream = reopen(target > 0 ? (Double(target) - 0.5) / frameRate : 0)
+            streamFrameOwed = true
+        } else {
+            currentFrameIndex = target
+            metalView.setNeedsDisplay()
+        }
+    }
+
+    /// Seeks to the frame showing at `seconds`, as `seekToFrame`.
+    @objc public func seekToTime(_ seconds: Double) {
+        let frame = (seconds > 0 ? seconds : 0) * frameRate + 1e-6
+        seekToFrame(Int(min(frame, Double(Int32.max))))
+    }
+
+    /// Loads `source` and shows its first frame; does nothing while it is already loaded or decoding.
+    private func load() {
+        guard !isRunning, !isDecoding, let source = source, let hash = sourceHash else { return }
 
         shouldStop = false
         generation += 1
@@ -367,17 +416,21 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
                 }
                 self.log("Streaming: \(self.videoWidth)x\(self.videoHeight) @ \(self.frameRate)fps")
                 let uvSize = (self.videoWidth / 2) * (self.videoHeight / 2)
-                let frames = FrameStream(
-                    path: filePath, outputOptions: "-f rawvideo -pix_fmt yuva420p",
-                    frameSize: self.videoWidth * self.videoHeight * 2 + uvSize * 2, bufferFrames: bufferFrames,
-                    loop: { [weak self] in self?.loop ?? false })
+                let frameSize = self.videoWidth * self.videoHeight * 2 + uvSize * 2
+                let openStream = { [weak self] (startSeconds: Double) in
+                    FrameStream(
+                        path: filePath, outputOptions: "-f rawvideo -pix_fmt yuva420p",
+                        frameSize: frameSize, bufferFrames: bufferFrames, startSeconds: startSeconds,
+                        loop: { [weak self] in self?.loop ?? false })
+                }
+                let frames = openStream(0)
                 DispatchQueue.main.async {
                     guard !self.isStopped(gen) else {
                         frames.close()
                         return
                     }
                     self.isDecoding = false
-                    self.startStreaming(frames, source: source)
+                    self.startStreaming(frames, reopen: openStream, source: source)
                 }
             } catch {
                 self.reportDecodeError(error, source: source, gen: gen)
@@ -385,19 +438,21 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
         }
     }
 
-    private func startStreaming(_ frames: FrameStream, source: String) {
+    private func startStreaming(_ frames: FrameStream, reopen: @escaping (Double) -> FrameStream, source: String) {
         guard let device = sharedMetalDevice, let textureSets = makeStreamTextures(device: device) else {
             frames.close()
             onError?("Failed to play \(source): could not create Metal textures")
             return
         }
         frameStream = frames
+        reopenStream = reopen
         streamTextures = textureSets
         nextStreamSet = 0
         currentStreamTextures = nil
         streamLoaded = false
+        streamFrameOwed = true
         frameInterval = 1.0 / frameRate
-        isPlaying = true
+        isRunning = true
         startDisplayLink()
     }
 
@@ -415,8 +470,8 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
         return sets
     }
 
-    /// Called on display link ticks when a frame is due. If the decoder is behind, the last
-    /// frame stays on screen.
+    /// Called on display link ticks when a frame is due or owed. If the decoder is behind, the
+    /// last frame stays on screen.
     private func showNextStreamFrame(_ frames: FrameStream) {
         let poll: FrameStream.Poll
         do {
@@ -433,22 +488,25 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
         case .waiting:
             return
         case .ended:
-            let played = streamLoaded
-            stop()
-            if played {
-                onEnd?()
-            } else {
+            guard streamLoaded else {
+                stop()
                 onError?("No frames decoded from \(source ?? "")")
+                return
             }
+            ended = true
+            streamFrameOwed = false
+            onEnd?()
         case .frame(let frame):
             let textures = streamTextures[nextStreamSet]
             nextStreamSet = (nextStreamSet + 1) % streamTextures.count
             upload(frame, into: textures)
             frames.recycle(frame)
             currentStreamTextures = textures
+            streamFrameOwed = false
             if !streamLoaded {
                 streamLoaded = true
                 let totalFrames = Int((durationSeconds * frameRate).rounded())
+                seekableFrames = totalFrames
                 onLoad?(totalFrames, videoWidth, videoHeight)
             }
             metalView.setNeedsDisplay()
@@ -474,8 +532,10 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
     private func closeStream() {
         frameStream?.close()
         frameStream = nil
+        reopenStream = nil
         streamTextures = []
         currentStreamTextures = nil
+        streamFrameOwed = false
     }
 
     private func startPlaying(_ textures: GPUTextureCache) {
@@ -483,7 +543,9 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
         frameRate = textures.frameRate
         frameInterval = 1.0 / frameRate
         currentFrameIndex = 0
-        isPlaying = true
+        isRunning = true
+        seekableFrames = textures.frameCount
+        metalView.setNeedsDisplay()
         onLoad?(textures.frameCount, textures.width, textures.height)
         startDisplayLink()
     }
@@ -492,10 +554,15 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
         return shouldStop || gen != generation
     }
 
+    /// Stops playback and clears the view; `play()` loads the clip again.
     @objc public func stop() {
         shouldStop = true
-        isPlaying = false
+        isRunning = false
         isDecoding = false
+        playRequested = false
+        wasPlaying = false
+        ended = false
+        seekableFrames = 0
         currentFrameIndex = 0
         stopDisplayLink()
         closeStream()
@@ -523,11 +590,24 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
     }
     
     @objc private func displayLinkFired(_ link: CADisplayLink) {
-        guard isPlaying, !shouldStop, !paused, frameStream != nil || currentTextureCache != nil else {
+        guard isRunning, !shouldStop, frameStream != nil || currentTextureCache != nil else {
+            return
+        }
+        let currentTime = link.timestamp
+        let playing = shouldPlay
+        if ended && playing && !wasPlaying { seekToFrame(0) }
+        wasPlaying = playing
+
+        if streamFrameOwed, let frames = frameStream {
+            showNextStreamFrame(frames)
+            lastFrameTime = currentTime
+            return
+        }
+        guard playing, !ended else {
+            lastFrameTime = currentTime
             return
         }
         
-        let currentTime = link.timestamp
         let elapsed = currentTime - lastFrameTime
         
         // Check if enough time has passed for next frame
@@ -540,22 +620,17 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
             }
             guard let cache = currentTextureCache else { return }
             
+            if currentFrameIndex + 1 < cache.frameCount {
+                currentFrameIndex += 1
+            } else if loop {
+                currentFrameIndex = 0
+            } else {
+                ended = true
+                onEnd?()
+                return
+            }
             // Just trigger redraw - textures already on GPU, no upload needed!
             metalView.setNeedsDisplay()
-            
-            // Advance to next frame
-            currentFrameIndex += 1
-            
-            // Handle loop
-            if currentFrameIndex >= cache.frameCount {
-                if loop {
-                    currentFrameIndex = 0
-                } else {
-                    isPlaying = false
-                    stopDisplayLink()
-                    onEnd?()
-                }
-            }
         }
     }
 

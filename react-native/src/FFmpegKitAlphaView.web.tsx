@@ -5,8 +5,8 @@
  * WebM with VP9+Alpha is natively supported in Chrome, Edge, and Firefox.
  */
 
-import React, { useRef, useEffect, useCallback, useState, useMemo } from 'react';
-import { View, StyleSheet, Platform } from 'react-native';
+import React, { forwardRef, useImperativeHandle, useRef, useEffect, useCallback, useState, useMemo } from 'react';
+import { View, StyleSheet } from 'react-native';
 
 export interface SourceType {
   uri?: string;
@@ -29,12 +29,20 @@ export interface FFmpegKitAlphaViewWebProps {
   onEnd?: (event: {}) => void;
 }
 
+export interface FFmpegKitAlphaViewWebRef {
+  seekToFrame: (frame: number) => void;
+  seekToTime: (seconds: number) => void;
+}
+
+/** The browser doesn't expose the frame rate. */
+const ASSUMED_FPS = 30;
+
 /** asset://path is served from the site root, like files bundled with a native app. */
 function resolveWebUri(uri: string): string {
   return uri.startsWith('asset://') ? '/' + uri.slice('asset://'.length).replace(/^\/+/, '') : uri;
 }
 
-export const FFmpegKitAlphaViewWeb: React.FC<FFmpegKitAlphaViewWebProps> = ({
+export const FFmpegKitAlphaViewWeb = forwardRef<FFmpegKitAlphaViewWebRef, FFmpegKitAlphaViewWebProps>(({
   source,
   autoPlay = true,
   loop = true,
@@ -43,9 +51,28 @@ export const FFmpegKitAlphaViewWeb: React.FC<FFmpegKitAlphaViewWebProps> = ({
   onLoad,
   onError,
   onEnd,
-}) => {
+}, ref) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isReady, setIsReady] = useState(false);
+
+  useImperativeHandle(ref, () => {
+    const seekToFrame = (frame: number) => {
+      const video = videoRef.current;
+      if (!video || !isReady) return;
+      const lastFrame = Math.max(0, Math.floor(video.duration * ASSUMED_FPS) - 1);
+      const clamped = Math.min(Math.max(0, Math.floor(frame) || 0), lastFrame);
+      // Chrome moves a second seek into the last frame to the very end, which wraps a looping clip to 0
+      const shown = Math.floor(video.currentTime * ASSUMED_FPS + 1e-6);
+      if (shown === clamped && !video.seeking) return;
+      // The middle of the frame, so rounding in the browser can't land on the one before
+      video.currentTime = (clamped + 0.5) / ASSUMED_FPS;
+    };
+    return {
+      seekToFrame,
+      seekToTime: (seconds: number) =>
+        seekToFrame(Math.floor((seconds > 0 ? seconds : 0) * ASSUMED_FPS + 1e-6)),
+    };
+  }, [isReady]);
 
   // Normalize source to get URI
   const videoSrc = useMemo(() => {
@@ -57,9 +84,8 @@ export const FFmpegKitAlphaViewWeb: React.FC<FFmpegKitAlphaViewWebProps> = ({
   const handleLoadedData = useCallback((e: React.SyntheticEvent<HTMLVideoElement, Event>) => {
     const video = e.currentTarget;
     setIsReady(true);
-    // The browser doesn't expose a frame count; this assumes 30 fps.
     onLoad?.({
-      totalFrames: Math.floor(video.duration * 30),
+      totalFrames: Math.floor(video.duration * ASSUMED_FPS),
       width: video.videoWidth,
       height: video.videoHeight,
     });
@@ -144,7 +170,7 @@ export const FFmpegKitAlphaViewWeb: React.FC<FFmpegKitAlphaViewWebProps> = ({
       />
     </View>
   );
-};
+});
 
 // CPU and GPU views are the same on web - just use the video element
 export const FFmpegKitAlphaCPUViewWeb = FFmpegKitAlphaViewWeb;

@@ -25,7 +25,7 @@ import java.util.function.BooleanSupplier;
  * of frame buffers. When every buffer is waiting to be shown, the reader stops reading, the pipe
  * fills and FFmpeg blocks, so memory stays at {@code bufferFrames × frameSize} however long the
  * clip is. A looping clip is decoded again from the start for each pass; the buffered frames
- * cover the restart.
+ * cover the restart. The first pass can start part-way in, for a seek.
  *
  * FFmpeg runs on a thread of its own rather than through FFmpegKit's async pool, which is
  * shared and capped at a few sessions: a stream holds its session for as long as it plays.
@@ -42,6 +42,7 @@ final class FrameStream implements AutoCloseable {
     private final WebMSource source;
     private final String outputOptions;
     private final int frameSize;
+    private final double startSeconds;
     private final BooleanSupplier loop;
     private final BooleanSupplier cancelled;
     private final ArrayBlockingQueue<byte[]> free;
@@ -53,11 +54,13 @@ final class FrameStream implements AutoCloseable {
     private volatile IOException failure;
 
     private FrameStream(Context context, WebMSource source, String outputOptions, int frameSize,
-                        int bufferFrames, BooleanSupplier loop, BooleanSupplier cancelled) {
+                        int bufferFrames, double startSeconds, BooleanSupplier loop,
+                        BooleanSupplier cancelled) {
         this.context = context;
         this.source = source;
         this.outputOptions = outputOptions;
         this.frameSize = frameSize;
+        this.startSeconds = startSeconds;
         this.loop = loop;
         this.cancelled = cancelled;
         this.free = new ArrayBlockingQueue<>(bufferFrames);
@@ -69,13 +72,15 @@ final class FrameStream implements AutoCloseable {
 
     /**
      * @param outputOptions FFmpeg options for the raw output, e.g. {@code "-f rawvideo -pix_fmt yuva420p"}
+     * @param startSeconds  the first pass starts with the first frame at or after this time
      * @param loop          read at the end of each pass: whether to decode the clip again
      * @param cancelled     polled while waiting for a frame; {@link #next()} returns null once it's true
      */
     static FrameStream start(Context context, WebMSource source, String outputOptions, int frameSize,
-                             int bufferFrames, BooleanSupplier loop, BooleanSupplier cancelled) {
-        FrameStream stream = new FrameStream(
-            context, source, outputOptions, frameSize, Math.max(1, bufferFrames), loop, cancelled);
+                             int bufferFrames, double startSeconds, BooleanSupplier loop,
+                             BooleanSupplier cancelled) {
+        FrameStream stream = new FrameStream(context, source, outputOptions, frameSize,
+            Math.max(1, bufferFrames), startSeconds, loop, cancelled);
         stream.reader.start();
         return stream;
     }
@@ -124,8 +129,10 @@ final class FrameStream implements AutoCloseable {
 
     private void run() {
         try {
+            double passStart = startSeconds;
             do {
-                decodePass();
+                decodePass(passStart);
+                passStart = 0;
             } while (!closed && loop.getAsBoolean());
         } catch (IOException e) {
             if (!closed) failure = e;
@@ -135,14 +142,14 @@ final class FrameStream implements AutoCloseable {
         }
     }
 
-    /** Decodes the clip once, from the start, into {@link #ready}. */
-    private void decodePass() throws IOException, InterruptedException {
+    /** Decodes the clip once, from {@code startSeconds} to the end, into {@link #ready}. */
+    private void decodePass(double startSeconds) throws IOException, InterruptedException {
         String pipe = FFmpegInput.newPipe(context);
         if (pipe == null) throw new IOException("Cannot create an FFmpeg pipe");
         try (FFmpegInput input = FFmpegInput.open(context, source)) {
             // -y: the pipe already exists, and FFmpeg would otherwise refuse to overwrite it.
             FFmpegSession pass = FFmpegSession.create(FFmpegKitConfig.parseArguments(
-                FFmpegDecoder.decodeCommand(input.argument(), outputOptions + " -y", pipe)));
+                FFmpegDecoder.decodeCommand(input, startSeconds, outputOptions + " -y", pipe)));
             session = pass;
             ReaderGate gate = new ReaderGate();
             Thread decoder = new Thread(() -> {

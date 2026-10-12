@@ -25,7 +25,7 @@ This was the first attempt, and it stays as a reference implementation: the whol
 - ⚡ **GPU acceleration** - OpenGL ES (Android) / Metal (iOS) for fast YUV→RGB conversion
 - 🔄 **CPU fallback** - Bitmap/UIImage-based rendering for maximum compatibility
 - 📦 **Automatic caching** - Downloads remote videos once, into the app cache
-- 🔁 **Loop & pause controls**, plus `onLoad` / `onError` / `onEnd` events
+- 🔁 **Loop, pause and seek controls**, plus `onLoad` / `onError` / `onEnd` events
 - 📱 **Cross-platform** - Android, iOS, and web (through `<video>`)
 
 ## Installation
@@ -200,9 +200,9 @@ Downloads only count as successful on HTTP 200. Without a `cacheKey` the file is
 |------|------|---------|-------------|
 | `source` | `{ uri, cacheKey? }` \| `string` | required | See [Sources](#sources) |
 | `cacheKey` | `string` | - | Cache file name for downloads; overrides `source.cacheKey`. Also names the decoded-frame cache on iOS in preload mode. Ignored on web |
-| `autoPlay` | `boolean` | `true` | Start playing automatically |
+| `autoPlay` | `boolean` | `true` | Start playing automatically. Off, the first frame shows and stays |
 | `loop` | `boolean` | `true` | Loop the animation |
-| `paused` | `boolean` | `false` | Pause the animation |
+| `paused` | `boolean` | `false` | Hold the current frame; playback carries on from it when unpaused. A clip that starts paused still loads and shows its first frame |
 | `useGPU` | `boolean` | `true` | Use GPU acceleration (`FFmpegKitAlphaView` only) |
 | `mode` | `'stream'` \| `'preload'` | `'stream'` | See [Playback modes](#playback-modes). Changing it restarts playback. Ignored on web |
 | `streamBufferFrames` | `number` | `15` | Frames decoded ahead in stream mode. Applies from the next start |
@@ -215,7 +215,25 @@ Downloads only count as successful on HTTP 200. Without a `cacheKey` the file is
 |---|---|---|
 | `onLoad` | `{ totalFrames, width, height }` | The first frame is ready (stream mode) or all frames are decoded (preload mode), and playback is starting. In stream mode `totalFrames` is estimated from the duration and frame rate; on web it assumes 30 fps |
 | `onError` | `{ error }` | The source couldn't be resolved, downloaded or decoded |
-| `onEnd` | `{}` | A non-looping clip played to the end |
+| `onEnd` | `{}` | A non-looping clip played to the end. Its last frame stays up; unpausing or seeking plays on |
+
+## Seeking
+
+```jsx
+const player = useRef(null);
+
+<FFmpegKitAlphaView ref={player} source={{ uri: 'asset://videos/glow.webm' }} />
+
+player.current?.seekToFrame(45);
+player.current?.seekToTime(1.5); // the frame showing at 1.5 s
+```
+
+| Ref method | Description |
+|---|---|
+| `seekToFrame(frame)` | Shows that frame, counted from 0, and keeps playing or stays paused |
+| `seekToTime(seconds)` | Seeks to the frame showing at that time: frame `floor(seconds × fps)` |
+
+Frames past either end are clamped to the clip. Seeks are ignored until `onLoad`. In preload mode a seek shows its frame straight away. In stream mode it decodes again from the keyframe before the target, so it takes as long as decoding up to there; it's ignored if the file doesn't give a duration. On web the frame rate is assumed to be 30 fps. The native views have the same methods: `seekToFrame(int)` / `seekToTime(double)` on Android, `seekToFrame(_:)` / `seekToTime(_:)` on iOS.
 
 ## Playback modes
 

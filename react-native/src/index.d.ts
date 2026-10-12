@@ -30,7 +30,7 @@ export interface FFmpegKitAlphaViewProps {
   source: FFmpegKitAlphaSource | string | null | undefined;
 
   /**
-   * Start playing automatically when source is set
+   * Start playing automatically when source is set. Off, the first frame shows and stays.
    * @default true
    */
   autoPlay?: boolean;
@@ -42,7 +42,8 @@ export interface FFmpegKitAlphaViewProps {
   loop?: boolean;
 
   /**
-   * Pause the animation
+   * Hold the current frame; playback carries on from it when unpaused. A clip that starts
+   * paused still loads and shows its first frame.
    * @default false
    */
   paused?: boolean;
@@ -109,19 +110,37 @@ export interface FFmpegKitAlphaViewProps {
 }
 
 /**
+ * Seeks show the frame (clamped to the clip) and keep playing, or stay paused. They are ignored
+ * until `onLoad`, and in `'stream'` mode when the file doesn't give a duration. A `'stream'`
+ * seek decodes again from the keyframe before the target, so it takes longer than a
+ * `'preload'` one. On web the frame rate is assumed to be 30 fps.
+ */
+export interface FFmpegKitAlphaViewRef {
+  seekToFrame: (frame: number) => void;
+  /** Seeks to the frame showing at that time, in seconds. */
+  seekToTime: (seconds: number) => void;
+}
+
+/**
  * Plays VP9+Alpha WebM, decoded by FFmpegKit. `useGPU` (default true) picks OpenGL ES / Metal
  * rendering over Bitmap / UIImage rendering. On web this is an HTML5 <video>.
  */
-export const FFmpegKitAlphaView: React.FC<FFmpegKitAlphaViewProps>;
+export const FFmpegKitAlphaView: React.ForwardRefExoticComponent<
+  FFmpegKitAlphaViewProps & React.RefAttributes<FFmpegKitAlphaViewRef>
+>;
 
 /**
  * CPU-only WebM Alpha View
  * Simpler rendering using Bitmap/UIImage, no GPU shaders
  */
-export const FFmpegKitAlphaCPUView: React.FC<Omit<FFmpegKitAlphaViewProps, 'useGPU'>>;
+export const FFmpegKitAlphaCPUView: React.ForwardRefExoticComponent<
+  Omit<FFmpegKitAlphaViewProps, 'useGPU'> & React.RefAttributes<FFmpegKitAlphaViewRef>
+>;
 
 /**
  * GPU-accelerated WebM Alpha View
  * Uses OpenGL ES (Android) or Metal (iOS) for YUV→RGB conversion
  */
-export const FFmpegKitAlphaGPUView: React.FC<Omit<FFmpegKitAlphaViewProps, 'useGPU'>>;
+export const FFmpegKitAlphaGPUView: React.ForwardRefExoticComponent<
+  Omit<FFmpegKitAlphaViewProps, 'useGPU'> & React.RefAttributes<FFmpegKitAlphaViewRef>
+>;

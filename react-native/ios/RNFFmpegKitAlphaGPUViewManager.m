@@ -14,4 +14,7 @@ RCT_REMAP_VIEW_PROPERTY(onLoad, reactOnLoad, RCTDirectEventBlock)
 RCT_REMAP_VIEW_PROPERTY(onError, reactOnError, RCTDirectEventBlock)
 RCT_REMAP_VIEW_PROPERTY(onEnd, reactOnEnd, RCTDirectEventBlock)
 
+RCT_EXTERN_METHOD(seekToFrame:(nonnull NSNumber *)reactTag frame:(nonnull NSNumber *)frame)
+RCT_EXTERN_METHOD(seekToTime:(nonnull NSNumber *)reactTag seconds:(nonnull NSNumber *)seconds)
+
 @end

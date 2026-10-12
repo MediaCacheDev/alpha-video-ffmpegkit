@@ -52,4 +52,20 @@ class RNFFmpegKitAlphaGPUViewManager: RCTViewManager {
     override static func requiresMainQueueSetup() -> Bool {
         return true
     }
+
+    @objc func seekToFrame(_ reactTag: NSNumber, frame: NSNumber) {
+        withView(reactTag) { $0.seekToFrame(frame.intValue) }
+    }
+
+    @objc func seekToTime(_ reactTag: NSNumber, seconds: NSNumber) {
+        withView(reactTag) { $0.seekToTime(seconds.doubleValue) }
+    }
+
+    /// Looks the view up through the UI manager: on the new architecture the registry handed to
+    /// the block only answers lookups, and bridging it to a Swift dictionary leaves it empty.
+    private func withView(_ reactTag: NSNumber, _ body: @escaping (RNFFmpegKitAlphaGPUView) -> Void) {
+        bridge.uiManager.addUIBlock { uiManager, _ in
+            if let view = uiManager?.view(forReactTag: reactTag) as? RNFFmpegKitAlphaGPUView { body(view) }
+        }
+    }
 }

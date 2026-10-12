@@ -13,6 +13,7 @@ import androidx.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 /** The FFmpegKit runs both views make: probe the video stream, then decode its frames. */
@@ -64,16 +65,25 @@ final class FFmpegDecoder {
     static void decode(Context context, WebMSource source, String outputOptions, File output) throws IOException {
         try (FFmpegInput input = FFmpegInput.open(context, source)) {
             FFmpegSession session = FFmpegKit.execute(
-                decodeCommand(input.argument(), outputOptions, output.getAbsolutePath()));
+                decodeCommand(input, 0, outputOptions, output.getAbsolutePath()));
             if (!ReturnCode.isSuccess(session.getReturnCode())) {
                 throw new IOException("FFmpeg decode failed: " + tail(session.getOutput()));
             }
         }
     }
 
-    static String decodeCommand(String input, String outputOptions, String output) {
+    /**
+     * @param startSeconds where the output starts: the first frame out is the first one at or
+     *                     after it. A file is read from the keyframe before it; a pipe can't
+     *                     seek, so it's decoded from the start and the frames before are dropped.
+     */
+    static String decodeCommand(FFmpegInput input, double startSeconds, String outputOptions, String output) {
+        String start = startSeconds > 0 ? String.format(Locale.ROOT, "-ss %.6f ", startSeconds) : "";
+        String inputStart = input.seekable() ? start : "";
+        String outputStart = input.seekable() ? "" : start;
         // libvpx-vp9 is the decoder that reads the alpha plane; FFmpeg's native vp9 ignores it.
-        return "-c:v libvpx-vp9 -i " + quote(input) + " -an " + outputOptions + " " + quote(output);
+        return inputStart + "-c:v libvpx-vp9 -i " + quote(input.argument()) + " -an " + outputStart
+            + outputOptions + " " + quote(output);
     }
 
     /**

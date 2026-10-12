@@ -43,20 +43,22 @@ public class FFmpegKitAlphaCPUView extends TextureView implements TextureView.Su
     
     private String sourcePath;
     private String cacheKey;  // Custom cache key from props
-    private boolean autoPlay = true;
-    private boolean loop = true;
-    private boolean paused = false;
+    private volatile boolean autoPlay = true;
+    private volatile boolean loop = true;
+    private volatile boolean paused = false;
     private boolean stream = true;
     private int streamBufferFrames = StreamMode.DEFAULT_BUFFER_FRAMES;
     
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private ExecutorService executor;
-    private final AtomicBoolean isPlaying = new AtomicBoolean(false);
+    // A job loads the source and shows it, playing or paused, until it's stopped.
+    private final AtomicBoolean isRunning = new AtomicBoolean(false);
     private final AtomicBoolean shouldStop = new AtomicBoolean(false);
     private final AtomicBoolean isDestroyed = new AtomicBoolean(false);
-    // Bumped by every start, so a job left over from an earlier source or pause stops itself.
+    // Bumped by every start, so a job left over from an earlier source stops itself.
     private final AtomicInteger generation = new AtomicInteger();
     private volatile int runningGeneration;
+    private volatile Playhead playhead;
     private PlayerCallback callback;
     private volatile boolean verbose = false;
     
@@ -125,23 +127,42 @@ public class FFmpegKitAlphaCPUView extends TextureView implements TextureView.Su
         stopPlayback();
         this.sourcePath = source;
         
-        if (source != null && autoPlay && !paused && isAvailable()) {
+        if (source != null && isAvailable()) {
             startPlayback();
         }
     }
     
+    /** Off: the first frame shows and stays until playback is allowed. */
     public void setAutoPlay(boolean autoPlay) {
         this.autoPlay = autoPlay;
-        updatePlaybackState();
     }
     
     public void setLoop(boolean loop) {
         this.loop = loop;
     }
     
+    /** Holds the current frame; the clip carries on from it when unpaused. */
     public void setPaused(boolean paused) {
         this.paused = paused;
-        updatePlaybackState();
+    }
+
+    /**
+     * Shows a frame, clamped to the clip, and plays on from it unless paused. Ignored until the
+     * clip has loaded, and in stream mode when the container doesn't give a duration.
+     */
+    public void seekToFrame(int frame) {
+        Playhead current = playhead;
+        if (current != null) current.seekToFrame(frame);
+    }
+
+    /** Seeks to the frame showing at {@code seconds}, as {@link #seekToFrame}. */
+    public void seekToTime(double seconds) {
+        Playhead current = playhead;
+        if (current != null) current.seekToTime(seconds);
+    }
+
+    private boolean shouldPlay() {
+        return autoPlay && !paused;
     }
 
     /** {@code "stream"} (default) or {@code "preload"}; changing it restarts playback. */
@@ -158,7 +179,7 @@ public class FFmpegKitAlphaCPUView extends TextureView implements TextureView.Su
     }
 
     private void restartPlayback() {
-        if (!isPlaying.get()) return;
+        if (!isRunning.get()) return;
         stopPlayback();
         startPlayback();
     }
@@ -173,25 +194,15 @@ public class FFmpegKitAlphaCPUView extends TextureView implements TextureView.Su
         this.cacheKey = cacheKey;
     }
     
-    private void updatePlaybackState() {
-        if (sourcePath == null || !isAvailable()) return;
-        
-        if (paused) {
-            stopPlayback();
-        } else if (autoPlay && !isPlaying.get()) {
-            startPlayback();
-        }
-    }
-    
     private void startPlayback() {
-        if (sourcePath == null || !isAvailable() || isPlaying.get() || isDestroyed.get()) {
+        if (sourcePath == null || !isAvailable() || isRunning.get() || isDestroyed.get()) {
             return;
         }
         
         final int gen = generation.incrementAndGet();
         final String source = sourcePath;
         shouldStop.set(false);
-        isPlaying.set(true);
+        isRunning.set(true);
         
         try {
             getOrCreateExecutor().execute(() -> {
@@ -202,18 +213,19 @@ public class FFmpegKitAlphaCPUView extends TextureView implements TextureView.Su
                     Log.e(TAG, "Playback error", e);
                     reportError("Playback failed: " + e.getMessage());
                 } finally {
-                    if (gen == generation.get()) isPlaying.set(false);
+                    if (gen == generation.get()) isRunning.set(false);
                 }
             });
         } catch (Exception e) {
             Log.e(TAG, "Failed to start playback", e);
-            isPlaying.set(false);
+            isRunning.set(false);
         }
     }
     
     private void stopPlayback() {
         shouldStop.set(true);
-        isPlaying.set(false);
+        isRunning.set(false);
+        playhead = null;
     }
     
     private void playVideo(String source) {
@@ -231,9 +243,11 @@ public class FFmpegKitAlphaCPUView extends TextureView implements TextureView.Su
         frameRate = info.frameRate;
         logD("Video: " + videoWidth + "x" + videoHeight + " @ " + frameRate + "fps");
         if (stopRequested()) return;
+        Playhead playhead = new Playhead(frameRate, this::shouldPlay, () -> loop, this::stopRequested);
+        this.playhead = playhead;
         if (stream) {
             totalFrames = info.estimatedFrames();
-            playStream(local, source);
+            playStream(local, source, playhead);
             return;
         }
         
@@ -257,8 +271,7 @@ public class FFmpegKitAlphaCPUView extends TextureView implements TextureView.Su
                 if (!stopRequested()) reportError("No frames decoded from " + source);
                 return;
             }
-            reportLoad();
-            playFrames(rawFile, frameSize);
+            playFrames(rawFile, frameSize, playhead);
         } finally {
             deleteRecursive(framesDir);
         }
@@ -276,72 +289,39 @@ public class FFmpegKitAlphaCPUView extends TextureView implements TextureView.Su
         return shouldStop.get() || isDestroyed.get() || runningGeneration != generation.get();
     }
     
-    private void playFrames(File rawFile, int frameSize) {
-        long frameIntervalNs = (long) (1_000_000_000.0 / frameRate);
+    /** Preload mode: frames are read back from the decoded file by index. */
+    private void playFrames(File rawFile, int frameSize, Playhead playhead) {
         byte[] frameBuffer = new byte[frameSize];
         int[] pixelBuffer = new int[videoWidth * videoHeight];
         
         try (RandomAccessFile raf = new RandomAccessFile(rawFile, "r")) {
-            do {
-                raf.seek(0);
-                long startTime = System.nanoTime();
-                int frameIndex = 0;
-                
-                while (!stopRequested() && frameIndex < totalFrames) {
-                    int bytesRead = raf.read(frameBuffer);
-                    if (bytesRead != frameSize) break;
-                    
-                    convertRGBAtoARGB(frameBuffer, pixelBuffer);
-                    renderFrame(pixelBuffer);
-                    
-                    frameIndex++;
-                    
-                    long targetTimeNs = startTime + (frameIndex * frameIntervalNs);
-                    long sleepNs = targetTimeNs - System.nanoTime();
-                    
-                    if (sleepNs > 1_000_000) {
-                        try {
-                            Thread.sleep(sleepNs / 1_000_000, (int) (sleepNs % 1_000_000));
-                        } catch (InterruptedException e) {
-                            Thread.currentThread().interrupt();
-                            return;
-                        }
-                    }
-                }
-                
-            } while (loop && !stopRequested());
-            
-            if (!stopRequested()) reportEnd();
+            playhead.playPreloaded(totalFrames, frame -> {
+                raf.seek((long) frame * frameSize);
+                raf.readFully(frameBuffer);
+                convertRGBAtoARGB(frameBuffer, pixelBuffer);
+                renderFrame(pixelBuffer);
+            }, this::reportLoad, this::reportEnd);
         } catch (Exception e) {
             Log.e(TAG, "Error playing frames", e);
         }
     }
     
     /** onLoad comes with the first frame, and totalFrames is estimated from the duration. */
-    private void playStream(WebMSource local, String source) {
+    private void playStream(WebMSource local, String source, Playhead playhead) {
         int frameSize = videoWidth * videoHeight * 4;
         int[] pixelBuffer = new int[videoWidth * videoHeight];
-        boolean loaded = false;
-        try (FrameStream frames = FrameStream.start(getContext(), local, "-vf format=rgba -f rawvideo",
-                frameSize, streamBufferFrames, () -> loop, this::stopRequested)) {
-            FrameClock clock = new FrameClock(frameRate);
-            byte[] frame;
-            while ((frame = frames.next()) != null) {
-                convertRGBAtoARGB(frame, pixelBuffer);
-                frames.recycle(frame);
-                if (!loaded) {
-                    reportLoad();
-                    loaded = true;
-                }
-                renderFrame(pixelBuffer);
-                if (!clock.awaitNextFrame()) return;
-            }
-            if (stopRequested()) return;
-            if (loaded) {
-                reportEnd();
-            } else {
-                reportError("No frames decoded from " + source);
-            }
+        int bufferFrames = streamBufferFrames;
+        try {
+            boolean decodedAny = playhead.playStream(totalFrames,
+                (startSeconds, cancelled) -> FrameStream.start(getContext(), local,
+                    "-vf format=rgba -f rawvideo", frameSize, bufferFrames, startSeconds,
+                    () -> loop, cancelled),
+                frame -> {
+                    convertRGBAtoARGB(frame, pixelBuffer);
+                    renderFrame(pixelBuffer);
+                },
+                this::reportLoad, this::reportEnd);
+            if (!decodedAny && !stopRequested()) reportError("No frames decoded from " + source);
         } catch (IOException e) {
             if (!stopRequested()) reportError("Failed to decode " + source + ": " + e.getMessage());
         }
@@ -466,7 +446,7 @@ public class FFmpegKitAlphaCPUView extends TextureView implements TextureView.Su
     @Override
     public void onSurfaceTextureAvailable(SurfaceTexture surface, int width, int height) {
         isDestroyed.set(false);
-        if (sourcePath != null && autoPlay && !paused) {
+        if (sourcePath != null) {
             startPlayback();
         }
     }
@@ -478,7 +458,7 @@ public class FFmpegKitAlphaCPUView extends TextureView implements TextureView.Su
     public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
         isDestroyed.set(true);
         shouldStop.set(true);
-        isPlaying.set(false);
+        isRunning.set(false);
         shutdownExecutor();
         
         synchronized (bitmapLock) {

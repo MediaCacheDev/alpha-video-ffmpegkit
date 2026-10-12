@@ -1,17 +1,19 @@
-import React, { useMemo } from 'react';
-import { Platform, View, StyleSheet } from 'react-native';
+import React, { forwardRef, useImperativeHandle, useMemo, useRef } from 'react';
+import { Platform, View, StyleSheet, UIManager, findNodeHandle } from 'react-native';
+
+const CPU_VIEW = 'RNFFmpegKitAlphaCPUView';
+const GPU_VIEW = 'RNFFmpegKitAlphaGPUView';
 
 // Platform-specific imports
-let NativeCPUView;
-let NativeGPUView;
+const nativeViews = {};
 let WebView;
 
 if (Platform.OS === 'web') {
   // Web implementation using HTML5 video element
   WebView = require('./FFmpegKitAlphaView.web').default;
 } else {
-  NativeCPUView = require('./FFmpegKitAlphaCPUViewNativeComponent').default;
-  NativeGPUView = require('./FFmpegKitAlphaGPUViewNativeComponent').default;
+  nativeViews[CPU_VIEW] = require('./FFmpegKitAlphaCPUViewNativeComponent').default;
+  nativeViews[GPU_VIEW] = require('./FFmpegKitAlphaGPUViewNativeComponent').default;
 }
 
 function sourceUri(source) {
@@ -25,7 +27,10 @@ function unwrap(handler) {
 }
 
 /**
- * Builds a player component. `pickNative(useGPU)` returns the native view to render.
+ * Builds a player component. `pickNative(useGPU)` names the native view to render.
+ *
+ * Ref: seekToFrame(frame) and seekToTime(seconds) show that frame (clamped to the clip) and
+ * keep playing or stay paused. Ignored until onLoad.
  *
  * Props:
  * - source: `{ uri, cacheKey? }` or a URI string. URIs: https://, http://, file://, an absolute
@@ -38,7 +43,7 @@ function unwrap(handler) {
  * - onLoad({ totalFrames, width, height }), onError({ error }), onEnd({})
  */
 function createPlayer(displayName, pickNative) {
-  const Player = React.memo(({
+  const Player = React.memo(forwardRef(({
     source,
     autoPlay = true,
     loop = true,
@@ -53,17 +58,42 @@ function createPlayer(displayName, pickNative) {
     onError,
     onEnd,
     ...otherProps
-  }) => {
+  }, ref) => {
     const uri = sourceUri(source);
     const key = cacheKey ?? (typeof source === 'object' ? source?.cacheKey : undefined) ?? undefined;
     const nativeSource = useMemo(
       () => (uri ? (key ? { uri, cacheKey: key } : { uri }) : null),
       [uri, key],
     );
+    const viewName = pickNative(useGPU);
+    const nativeRef = useRef(null);
+
+    useImperativeHandle(ref, () => {
+      if (Platform.OS === 'web') {
+        return {
+          seekToFrame: (frame) => nativeRef.current?.seekToFrame(frame),
+          seekToTime: (seconds) => nativeRef.current?.seekToTime(seconds),
+        };
+      }
+      const sendCommand = (name, args) => {
+        const handle = nativeRef.current ? findNodeHandle(nativeRef.current) : null;
+        if (!handle) return;
+        UIManager.dispatchViewManagerCommand(
+          handle,
+          UIManager.getViewManagerConfig(viewName)?.Commands?.[name] ?? name,
+          args,
+        );
+      };
+      return {
+        seekToFrame: (frame) => sendCommand('seekToFrame', [frame]),
+        seekToTime: (seconds) => sendCommand('seekToTime', [seconds]),
+      };
+    }, [viewName]);
 
     if (Platform.OS === 'web') {
       return (
         <WebView
+          ref={nativeRef}
           source={uri}
           autoPlay={autoPlay}
           loop={loop}
@@ -81,9 +111,10 @@ function createPlayer(displayName, pickNative) {
       return <View style={style} />;
     }
 
-    const NativeComponent = pickNative(useGPU);
+    const NativeComponent = nativeViews[viewName];
     return (
       <NativeComponent
+        ref={nativeRef}
         source={nativeSource}
         cacheKey={key}
         autoPlay={autoPlay}
@@ -99,7 +130,7 @@ function createPlayer(displayName, pickNative) {
         {...otherProps}
       />
     );
-  });
+  }));
   Player.displayName = displayName;
   return Player;
 }
@@ -109,14 +140,14 @@ function createPlayer(displayName, pickNative) {
  * Bitmap / UIImage rendering. On web this is an HTML5 <video>.
  */
 export const FFmpegKitAlphaView = createPlayer('FFmpegKitAlphaView', (useGPU) =>
-  useGPU ? NativeGPUView : NativeCPUView,
+  useGPU ? GPU_VIEW : CPU_VIEW,
 );
 
 /** CPU rendering (Bitmap on Android, UIImage on iOS). */
-export const FFmpegKitAlphaCPUView = createPlayer('FFmpegKitAlphaCPUView', () => NativeCPUView);
+export const FFmpegKitAlphaCPUView = createPlayer('FFmpegKitAlphaCPUView', () => CPU_VIEW);
 
 /** GPU rendering (OpenGL ES on Android, Metal on iOS). */
-export const FFmpegKitAlphaGPUView = createPlayer('FFmpegKitAlphaGPUView', () => NativeGPUView);
+export const FFmpegKitAlphaGPUView = createPlayer('FFmpegKitAlphaGPUView', () => GPU_VIEW);
 
 const styles = StyleSheet.create({
   container: {

@@ -22,7 +22,7 @@ final class StreamFrame {
 /// pool of frame buffers. When every buffer is waiting to be shown, the reader stops reading,
 /// the pipe fills and FFmpeg blocks, so memory stays at `bufferFrames × frameSize` however long
 /// the clip is. A looping clip is decoded again from the start for each pass; the buffered
-/// frames cover the restart.
+/// frames cover the restart. The first pass can start part-way in, for a seek.
 ///
 /// FFmpeg runs on a thread of its own rather than through FFmpegKit's async queue: a stream
 /// holds its session for as long as it plays.
@@ -41,6 +41,7 @@ final class FrameStream {
     private let path: String
     private let outputOptions: String
     private let frameSize: Int
+    private let startSeconds: Double
     private let loop: () -> Bool
 
     private let condition = NSCondition()
@@ -53,11 +54,14 @@ final class FrameStream {
 
     /// - Parameters:
     ///   - outputOptions: FFmpeg options for the raw output, e.g. `-f rawvideo -pix_fmt yuva420p`
+    ///   - startSeconds: the first pass starts with the first frame at or after this time
     ///   - loop: read at the end of each pass: whether to decode the clip again
-    init(path: String, outputOptions: String, frameSize: Int, bufferFrames: Int, loop: @escaping () -> Bool) {
+    init(path: String, outputOptions: String, frameSize: Int, bufferFrames: Int,
+         startSeconds: Double = 0, loop: @escaping () -> Bool) {
         self.path = path
         self.outputOptions = outputOptions
         self.frameSize = frameSize
+        self.startSeconds = startSeconds
         self.loop = loop
         self.free = (0..<max(1, bufferFrames)).map { _ in StreamFrame(count: frameSize) }
         let reader = Thread { [self] in run() }
@@ -115,8 +119,10 @@ final class FrameStream {
 
     private func run() {
         var failure: String?
+        var passStart = startSeconds
         while failure == nil && !isClosed {
-            failure = decodePass()
+            failure = decodePass(from: passStart)
+            passStart = 0
             if !loop() { break }
         }
         condition.lock()
@@ -126,14 +132,16 @@ final class FrameStream {
         condition.unlock()
     }
 
-    /// Decodes the clip once, from the start, into `ready`. Returns an error message.
-    private func decodePass() -> String? {
+    /// Decodes the clip once, from `startSeconds` to the end, into `ready`. Returns an error message.
+    private func decodePass(from startSeconds: Double) -> String? {
         guard let pipe = FFmpegKitConfig.registerNewFFmpegPipe() else { return "Cannot create an FFmpeg pipe" }
         defer { FFmpegKitConfig.closeFFmpegPipe(pipe) }
 
         // libvpx-vp9 is the decoder that reads the alpha plane; FFmpeg's native vp9 ignores it.
         // -y: the pipe already exists, and FFmpeg would otherwise refuse to overwrite it.
-        let command = "-c:v libvpx-vp9 -i \"\(path)\" -an \(outputOptions) -y \"\(pipe)\""
+        // -ss before -i decodes from the keyframe before it and drops the frames before it.
+        let start = startSeconds > 0 ? String(format: "-ss %.6f ", locale: Locale(identifier: "en_US_POSIX"), startSeconds) : ""
+        let command = "\(start)-c:v libvpx-vp9 -i \"\(path)\" -an \(outputOptions) -y \"\(pipe)\""
         guard let pass = FFmpegSession.create(FFmpegKitConfig.parseArguments(command)) else {
             return "FFmpeg did not start"
         }

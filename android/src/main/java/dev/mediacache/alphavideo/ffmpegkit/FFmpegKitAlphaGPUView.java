@@ -47,20 +47,22 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
     
     private String sourcePath;
     private String cacheKey;  // Custom cache key from props
-    private boolean autoPlay = true;
-    private boolean loop = true;
-    private boolean paused = false;
+    private volatile boolean autoPlay = true;
+    private volatile boolean loop = true;
+    private volatile boolean paused = false;
     private boolean stream = true;
     private int streamBufferFrames = StreamMode.DEFAULT_BUFFER_FRAMES;
     
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private ExecutorService executor;
-    private final AtomicBoolean isPlaying = new AtomicBoolean(false);
+    // A job loads the source and shows it, playing or paused, until it's stopped.
+    private final AtomicBoolean isRunning = new AtomicBoolean(false);
     private final AtomicBoolean shouldStop = new AtomicBoolean(false);
     private final AtomicBoolean isDestroyed = new AtomicBoolean(false);
-    // Bumped by every start, so a job left over from an earlier source or pause stops itself.
+    // Bumped by every start, so a job left over from an earlier source stops itself.
     private final AtomicInteger generation = new AtomicInteger();
     private volatile int runningGeneration;
+    private volatile Playhead playhead;
     private PlayerCallback callback;
     private volatile boolean verbose = false;
     
@@ -80,7 +82,6 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
     
     // GPU texture cache - all frames pre-uploaded to GPU
     private int[][] frameTextures; // [frameIndex][0=Y, 1=U, 2=V, 3=A]
-    private int currentFrameIndex = 0;
     
     private boolean hasLoggedFirstFrame = false;
     
@@ -197,23 +198,42 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
         this.sourcePath = source;
         hasLoggedFirstFrame = false;
         
-        if (source != null && autoPlay && !paused && isAvailable()) {
+        if (source != null && isAvailable()) {
             startPlayback();
         }
     }
     
+    /** Off: the first frame shows and stays until playback is allowed. */
     public void setAutoPlay(boolean autoPlay) {
         this.autoPlay = autoPlay;
-        updatePlaybackState();
     }
     
     public void setLoop(boolean loop) {
         this.loop = loop;
     }
     
+    /** Holds the current frame; the clip carries on from it when unpaused. */
     public void setPaused(boolean paused) {
         this.paused = paused;
-        updatePlaybackState();
+    }
+
+    /**
+     * Shows a frame, clamped to the clip, and plays on from it unless paused. Ignored until the
+     * clip has loaded, and in stream mode when the container doesn't give a duration.
+     */
+    public void seekToFrame(int frame) {
+        Playhead current = playhead;
+        if (current != null) current.seekToFrame(frame);
+    }
+
+    /** Seeks to the frame showing at {@code seconds}, as {@link #seekToFrame}. */
+    public void seekToTime(double seconds) {
+        Playhead current = playhead;
+        if (current != null) current.seekToTime(seconds);
+    }
+
+    private boolean shouldPlay() {
+        return autoPlay && !paused;
     }
 
     /** {@code "stream"} (default) or {@code "preload"}; changing it restarts playback. */
@@ -230,7 +250,7 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
     }
 
     private void restartPlayback() {
-        if (!isPlaying.get()) return;
+        if (!isRunning.get()) return;
         stopPlayback();
         startPlayback();
     }
@@ -245,25 +265,15 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
         this.cacheKey = cacheKey;
     }
     
-    private void updatePlaybackState() {
-        if (sourcePath == null || !isAvailable()) return;
-        
-        if (paused) {
-            stopPlayback();
-        } else if (autoPlay && !isPlaying.get()) {
-            startPlayback();
-        }
-    }
-    
     private void startPlayback() {
-        if (sourcePath == null || !isAvailable() || isPlaying.get() || isDestroyed.get()) {
+        if (sourcePath == null || !isAvailable() || isRunning.get() || isDestroyed.get()) {
             return;
         }
         
         final int gen = generation.incrementAndGet();
         final String source = sourcePath;
         shouldStop.set(false);
-        isPlaying.set(true);
+        isRunning.set(true);
         
         try {
             getOrCreateExecutor().execute(() -> {
@@ -275,18 +285,19 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
                     reportError("Playback failed: " + e.getMessage());
                 } finally {
                     cleanupGL();
-                    if (gen == generation.get()) isPlaying.set(false);
+                    if (gen == generation.get()) isRunning.set(false);
                 }
             });
         } catch (Exception e) {
             Log.e(TAG, "Failed to start playback", e);
-            isPlaying.set(false);
+            isRunning.set(false);
         }
     }
     
     private void stopPlayback() {
         shouldStop.set(true);
-        isPlaying.set(false);
+        isRunning.set(false);
+        playhead = null;
     }
     
     private void playVideo(String source) {
@@ -310,9 +321,11 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
             if (!stopRequested()) reportError("Failed to initialize OpenGL ES");
             return;
         }
+        Playhead playhead = new Playhead(frameRate, this::shouldPlay, () -> loop, this::stopRequested);
+        this.playhead = playhead;
         if (stream) {
             totalFrames = info.estimatedFrames();
-            playStream(local, source);
+            playStream(local, source, playhead);
             return;
         }
         
@@ -345,8 +358,7 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
             }
             // Upload ALL frames to GPU textures first, then play with no per-frame upload
             if (uploadAllFramesToGPU(rawFile, ySize, uvSize, aSize, frameSize)) {
-                reportLoad();
-                playFromGPUCache();
+                playFromGPUCache(playhead);
             }
             
         } finally {
@@ -576,43 +588,20 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
      * Play from GPU texture cache - zero per-frame upload!
      * Just bind pre-uploaded textures and render.
      */
-    private void playFromGPUCache() {
-        long frameIntervalNs = (long) (1_000_000_000.0 / frameRate);
-        int uvWidth = videoWidth / 2;
-        int uvHeight = videoHeight / 2;
-        
-        do {
-            long startTime = System.nanoTime();
-            currentFrameIndex = 0;
-            
-            while (!stopRequested() && currentFrameIndex < totalFrames) {
-                renderFrameFromGPU(currentFrameIndex, uvWidth, uvHeight);
-                
-                currentFrameIndex++;
-                
-                long targetTimeNs = startTime + (currentFrameIndex * frameIntervalNs);
-                long sleepNs = targetTimeNs - System.nanoTime();
-                
-                if (sleepNs > 1_000_000) {
-                    try {
-                        Thread.sleep(sleepNs / 1_000_000, (int) (sleepNs % 1_000_000));
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        return;
-                    }
-                }
-            }
-            
-        } while (loop && !stopRequested());
-        
-        if (!stopRequested()) reportEnd();
+    private void playFromGPUCache(Playhead playhead) {
+        try {
+            playhead.playPreloaded(totalFrames, frame -> renderFrameFromGPU(frame),
+                this::reportLoad, this::reportEnd);
+        } catch (IOException e) {
+            // Drawing from textures doesn't read anything.
+        }
     }
 
     /**
      * Stream mode: each frame is uploaded into the same four textures just before it's drawn.
      * onLoad comes with the first frame, and totalFrames is estimated from the duration.
      */
-    private void playStream(WebMSource local, String source) {
+    private void playStream(WebMSource local, String source, Playhead playhead) {
         int uvWidth = videoWidth / 2;
         int uvHeight = videoHeight / 2;
         int ySize = videoWidth * videoHeight;
@@ -628,30 +617,21 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
         ByteBuffer planeBuffer = ByteBuffer.allocateDirect(ySize).order(ByteOrder.nativeOrder());
         GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1);
 
-        boolean loaded = false;
-        try (FrameStream frames = FrameStream.start(getContext(), local, "-f rawvideo -pix_fmt yuva420p",
-                frameSize, streamBufferFrames, () -> loop, this::stopRequested)) {
-            FrameClock clock = new FrameClock(frameRate);
-            byte[] frame;
-            while ((frame = frames.next()) != null) {
-                uploadPlane(texIds[0], planeBuffer, frame, 0, videoWidth, videoHeight);
-                uploadPlane(texIds[1], planeBuffer, frame, ySize, uvWidth, uvHeight);
-                uploadPlane(texIds[2], planeBuffer, frame, ySize + uvSize, uvWidth, uvHeight);
-                uploadPlane(texIds[3], planeBuffer, frame, ySize + uvSize + uvSize, videoWidth, videoHeight);
-                frames.recycle(frame);
-                if (!loaded) {
-                    reportLoad();
-                    loaded = true;
-                }
-                drawPlanes(texIds);
-                if (!clock.awaitNextFrame()) return;
-            }
-            if (stopRequested()) return;
-            if (loaded) {
-                reportEnd();
-            } else {
-                reportError("No frames decoded from " + source);
-            }
+        int bufferFrames = streamBufferFrames;
+        try {
+            boolean decodedAny = playhead.playStream(totalFrames,
+                (startSeconds, cancelled) -> FrameStream.start(getContext(), local,
+                    "-f rawvideo -pix_fmt yuva420p", frameSize, bufferFrames, startSeconds,
+                    () -> loop, cancelled),
+                frame -> {
+                    uploadPlane(texIds[0], planeBuffer, frame, 0, videoWidth, videoHeight);
+                    uploadPlane(texIds[1], planeBuffer, frame, ySize, uvWidth, uvHeight);
+                    uploadPlane(texIds[2], planeBuffer, frame, ySize + uvSize, uvWidth, uvHeight);
+                    uploadPlane(texIds[3], planeBuffer, frame, ySize + uvSize + uvSize, videoWidth, videoHeight);
+                    drawPlanes(texIds);
+                },
+                this::reportLoad, this::reportEnd);
+            if (!decodedAny && !stopRequested()) reportError("No frames decoded from " + source);
         } catch (IOException e) {
             if (!stopRequested()) reportError("Failed to decode " + source + ": " + e.getMessage());
         } finally {
@@ -682,7 +662,7 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
     /**
      * Render a single frame from GPU cache - NO texture upload, just bind and draw!
      */
-    private void renderFrameFromGPU(int frameIdx, int uvWidth, int uvHeight) {
+    private void renderFrameFromGPU(int frameIdx) {
         if (eglDisplay == null || eglSurface == null || frameTextures == null) return;
         if (frameIdx >= frameTextures.length) return;
         
@@ -799,7 +779,7 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
     @Override
     public void onSurfaceTextureAvailable(SurfaceTexture surface, int width, int height) {
         isDestroyed.set(false);
-        if (sourcePath != null && autoPlay && !paused) {
+        if (sourcePath != null) {
             startPlayback();
         }
     }
@@ -811,7 +791,7 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
     public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
         isDestroyed.set(true);
         shouldStop.set(true);
-        isPlaying.set(false);
+        isRunning.set(false);
         shutdownExecutor();
         return true;
     }

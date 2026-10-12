@@ -67,6 +67,11 @@ final class FFmpegInput implements AutoCloseable {
         return argument;
     }
 
+    /** False for a pipe, which FFmpeg can only read from the start. */
+    boolean seekable() {
+        return pipe == null;
+    }
+
     private void copy(InputStream source) {
         // Opening a pipe for writing blocks until FFmpeg opens it for reading. FFmpeg stops
         // reading early when it has seen enough (ffprobe), which ends the copy with EPIPE.

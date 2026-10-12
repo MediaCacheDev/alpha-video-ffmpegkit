@@ -4,6 +4,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.facebook.react.bridge.ReactApplicationContext;
+import com.facebook.react.bridge.ReadableArray;
 import com.facebook.react.bridge.ReadableMap;
 import com.facebook.react.uimanager.SimpleViewManager;
 import com.facebook.react.uimanager.ThemedReactContext;
@@ -90,6 +91,19 @@ public class FFmpegKitAlphaGPUViewManager extends SimpleViewManager<FFmpegKitAlp
     public void setBackgroundColor(FFmpegKitAlphaGPUView view, @Nullable Integer color) {
     }
     
+    @Override
+    public void receiveCommand(@NonNull FFmpegKitAlphaGPUView view, String commandId, @Nullable ReadableArray args) {
+        if (args == null || args.size() == 0) return;
+        switch (commandId) {
+            case "seekToFrame":
+                view.seekToFrame(args.getInt(0));
+                break;
+            case "seekToTime":
+                view.seekToTime(args.getDouble(0));
+                break;
+        }
+    }
+
     @Nullable
     @Override
     public Map<String, Object> getExportedCustomDirectEventTypeConstants() {

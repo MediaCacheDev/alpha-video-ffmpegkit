@@ -2,3 +2,4 @@
 // podspec makes this a public header and Swift sees it through the pod's umbrella header.
 
 #import <React/RCTViewManager.h>
+#import <React/RCTUIManager.h>
