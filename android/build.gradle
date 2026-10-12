@@ -17,12 +17,12 @@ def safeExtGet(prop, fallback) {
 
 android {
     namespace "com.webmalphaplayer"
-    compileSdkVersion safeExtGet('compileSdkVersion', 34)
+    compileSdkVersion safeExtGet('compileSdkVersion', 36)
     
     defaultConfig {
         // FFmpegKit 6.0 needs API 24
         minSdkVersion safeExtGet('minSdkVersion', 24)
-        targetSdkVersion safeExtGet('targetSdkVersion', 34)
+        targetSdkVersion safeExtGet('targetSdkVersion', 36)
     }
     
     buildTypes {
