@@ -56,7 +56,10 @@ private struct FrameClock {
 // Configure cache limits
 private func configureFrameCache() {
     frameCache.countLimit = 10 // Max 10 videos cached
-    frameCache.totalCostLimit = 100 * 1024 * 1024 // 100MB total limit
+    // NSCache drops an entry costing more than the whole limit straight away, and one 400×400
+    // clip of 181 RGBA frames is already 113 MB. Playing views share their entry's frames, so
+    // the limit only bounds clips no longer on screen; memory warnings empty it.
+    frameCache.totalCostLimit = Int(ProcessInfo.processInfo.physicalMemory / 8)
 }
 
 @objc(WebMAlphaCPUView)
