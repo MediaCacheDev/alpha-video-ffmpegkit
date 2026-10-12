@@ -10,7 +10,7 @@ This was the first attempt, and it stays as a reference implementation: the whol
 |---|---|---|
 | Decoding | FFmpegKit command line, to raw frames | libvpx through FFmpeg's API, in process |
 | Playback | stream or preload | stream, preload or both |
-| http(s) sources | downloaded in full first | downloaded in full first |
+| http(s) sources | downloaded in full first | play while downloading (stream modes) |
 | FFmpeg licence | LGPL-3.0 (FFmpegKit builds with `--enable-version3`) | LGPL-2.1 |
 
 ## Features
