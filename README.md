@@ -2,14 +2,15 @@
 
 A React Native library for playing VP9+Alpha WebM videos with transparency support, decoding with [FFmpegKit](https://github.com/arthenica/ffmpeg-kit) from plain Java and Swift.
 
-Every clip is decoded in full before the first frame is shown, and all frames are kept for playback (see [Memory](#memory)). That suits short UI animations; it doesn't suit long or large clips.
+By default clips are decoded while they play, a few frames ahead, so memory stays flat however long the clip is. `mode="preload"` decodes every frame first instead, which suits short clips that loop for a long time (see [Playback modes](#playback-modes)).
 
 This was the first attempt, and it stays as a reference implementation: the whole player is plain Java and Swift around FFmpeg command lines. For production, use [react-native-webm-alpha-player](https://github.com/danielkpl2/react-native-webm-alpha-player), which shares a C++ decoder between platforms:
 
 | | this package | react-native-webm-alpha-player |
 |---|---|---|
-| Decoding | FFmpegKit command line, to a raw file | libvpx through FFmpeg's API, in process |
-| Playback | whole clip decoded first | streaming, preload or both |
+| Decoding | FFmpegKit command line, to raw frames | libvpx through FFmpeg's API, in process |
+| Playback | stream or preload | stream, preload or both |
+| http(s) sources | downloaded in full first | downloaded in full first |
 | FFmpeg licence | LGPL-3.0 (FFmpegKit builds with `--enable-version3`) | LGPL-2.1 |
 
 ## Features
@@ -140,11 +141,13 @@ Downloads only count as successful on HTTP 200. Without a `cacheKey` the file is
 | Prop | Type | Default | Description |
 |------|------|---------|-------------|
 | `source` | `{ uri, cacheKey? }` \| `string` | required | See [Sources](#sources) |
-| `cacheKey` | `string` | - | Cache file name for downloads; overrides `source.cacheKey`. Also names the decoded-frame cache on iOS. Ignored on web |
+| `cacheKey` | `string` | - | Cache file name for downloads; overrides `source.cacheKey`. Also names the decoded-frame cache on iOS in preload mode. Ignored on web |
 | `autoPlay` | `boolean` | `true` | Start playing automatically |
 | `loop` | `boolean` | `true` | Loop the animation |
 | `paused` | `boolean` | `false` | Pause the animation |
 | `useGPU` | `boolean` | `true` | Use GPU acceleration (`WebMAlphaView` only) |
+| `mode` | `'stream'` \| `'preload'` | `'stream'` | See [Playback modes](#playback-modes). Changing it restarts playback. Ignored on web |
+| `streamBufferFrames` | `number` | `15` | Frames decoded ahead in stream mode. Applies from the next start |
 | `verbose` | `boolean` | `false` | Log progress to logcat / the iOS console. Errors are always logged |
 | `style` | `ViewStyle` | - | View style |
 
@@ -152,22 +155,28 @@ Downloads only count as successful on HTTP 200. Without a `cacheKey` the file is
 
 | Event | Payload | When |
 |---|---|---|
-| `onLoad` | `{ totalFrames, width, height }` | All frames are decoded and playback is starting. On web, `totalFrames` assumes 30 fps |
+| `onLoad` | `{ totalFrames, width, height }` | The first frame is ready (stream mode) or all frames are decoded (preload mode), and playback is starting. In stream mode `totalFrames` is estimated from the duration and frame rate; on web it assumes 30 fps |
 | `onError` | `{ error }` | The source couldn't be resolved, downloaded or decoded |
 | `onEnd` | `{}` | A non-looping clip played to the end |
 
+## Playback modes
+
+**Stream** (default): FFmpeg decodes into a fixed pool of `streamBufferFrames` frames and waits whenever the pool is full, so it runs at the clip's frame rate and the first frame shows as soon as it's decoded. Memory stays the same however long the clip is, but FFmpeg runs for as long as the clip plays, and each loop decodes the clip again from the start. A device that can't decode the clip in real time plays it slower rather than dropping frames.
+
+**Preload** (`mode="preload"`): every frame is decoded before playback starts and kept, so loops cost nothing after the first pass. Memory and the wait before the first frame grow with the clip.
+
+In both modes an http(s) source is downloaded in full before decoding starts. Frames are shown at the file's frame rate (`avg_frame_rate`, then `r_frame_rate`, then 30 fps).
+
 ## Memory
 
-The whole clip is decoded before playback starts, and every frame is kept:
-
-| View | Where the frames live | Size |
+| View | Stream | Preload |
 |---|---|---|
-| Android CPU | Raw RGBA file in the cache directory, read a frame at a time | Disk `W×H×4×frames` |
-| Android GPU | OpenGL textures | GPU memory `W×H×2.5×frames` |
-| iOS CPU | RAM (shared `NSCache`, up to 100 MB) | `W×H×4×frames` |
-| iOS GPU | Metal textures (shared cache) | `W×H×2.5×frames` |
+| Android CPU | RAM `W×H×4×streamBufferFrames` | Disk `W×H×4×frames` (raw RGBA file in the cache directory, read a frame at a time) |
+| Android GPU | RAM `W×H×2.5×streamBufferFrames`, plus one set of textures | GPU memory `W×H×2.5×frames` |
+| iOS CPU | RAM `W×H×4×streamBufferFrames` | RAM `W×H×4×frames` (shared `NSCache`, up to 100 MB) |
+| iOS GPU | RAM `W×H×2.5×streamBufferFrames`, plus three sets of textures | Metal textures `W×H×2.5×frames` (shared cache) |
 
-A 1080×1080 clip of 90 frames is about 400 MB as RGBA, so keep clips short and small.
+A 1080×1080 clip of 90 frames is about 400 MB as RGBA when preloaded; streamed with the default 15 frames, it's about 70 MB however many frames it has.
 
 ## GPU vs CPU Mode
 
@@ -228,7 +237,7 @@ ffmpeg -i input.mp4 -vf "chromakey=0x00ff00:0.1:0.2" -c:v libvpx-vp9 -pix_fmt yu
 ## Requirements
 
 - React Native 0.70+
-- Android: minSdkVersion 24, compileSdkVersion 34
+- Android: minSdkVersion 24; compileSdkVersion and targetSdkVersion come from the app (default 36)
 - iOS: iOS 13.0+
 
 ## License
