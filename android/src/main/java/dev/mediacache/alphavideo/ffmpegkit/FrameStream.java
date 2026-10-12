@@ -137,7 +137,7 @@ final class FrameStream implements AutoCloseable {
 
     /** Decodes the clip once, from the start, into {@link #ready}. */
     private void decodePass() throws IOException, InterruptedException {
-        String pipe = FFmpegKitConfig.registerNewFFmpegPipe(context);
+        String pipe = FFmpegInput.newPipe(context);
         if (pipe == null) throw new IOException("Cannot create an FFmpeg pipe");
         try (FFmpegInput input = FFmpegInput.open(context, source)) {
             // -y: the pipe already exists, and FFmpeg would otherwise refuse to overwrite it.

@@ -44,7 +44,7 @@ final class FFmpegInput implements AutoCloseable {
         }
 
         InputStream in = source.openStream(context);
-        String pipe = FFmpegKitConfig.registerNewFFmpegPipe(context);
+        String pipe = newPipe(context);
         if (pipe == null) {
             in.close();
             throw new IOException("Cannot create an FFmpeg pipe");
@@ -53,6 +53,14 @@ final class FFmpegInput implements AutoCloseable {
         input.writer = new Thread(() -> input.copy(in), "FFmpegKitAlphaPipe");
         input.writer.start();
         return input;
+    }
+
+    /**
+     * A new FFmpegKit named pipe, or null. FFmpegKit creates its pipes directory on first use and
+     * fails when two threads both find it missing, so calls are serialised.
+     */
+    static synchronized String newPipe(Context context) {
+        return FFmpegKitConfig.registerNewFFmpegPipe(context);
     }
 
     String argument() {
