@@ -7,12 +7,8 @@ android/build/
 android/.gradle/
 android/.cxx/
 ios/build/
-scripts/build/
-scripts/maven/.gradle/
-scripts/maven/build/
 
-# FFmpegKit binaries, produced by scripts/build-ffmpeg-*.sh
-android/libs/*.aar
+# ffmpegkit-vp9 XCFrameworks, from scripts/fetch-ffmpegkit-ios.sh
 ios/Frameworks/
 
 # Local backups and experiments

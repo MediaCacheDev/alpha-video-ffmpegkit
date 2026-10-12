@@ -35,41 +35,15 @@ yarn add react-native-webm-alpha-player-js
 cd ios && pod install
 ```
 
-The npm package ships the FFmpegKit XCFrameworks in `ios/Frameworks`. They are dynamic frameworks, and CocoaPods embeds them in the app. They aren't in git, so a clone of this repo needs `./scripts/build-ffmpeg-ios.sh` first (see below).
+The npm package ships the FFmpegKit XCFrameworks in `ios/Frameworks`. They are dynamic frameworks, and CocoaPods embeds them in the app. They aren't in git, so a clone of this repo needs `./scripts/fetch-ffmpegkit-ios.sh` first, which downloads them from the ffmpegkit-vp9 release and checks their SHA-256.
 
 ### Android Setup
 
-FFmpegKit's own binaries are no longer published. The library depends on `dev.mediacache:ffmpegkit-vp9:6.0.0`, a minimal FFmpegKit build made by `scripts/build-ffmpeg-android.sh` with the same `com.arthenica.ffmpegkit` API. It needs `minSdkVersion` 24.
+FFmpegKit's own binaries are no longer published. The library depends on `dev.mediacache:ffmpegkit-vp9:6.0.0` from Maven Central, a minimal FFmpegKit build with the same `com.arthenica.ffmpegkit` API. It needs `minSdkVersion` 24.
 
-Until that artifact is on Maven Central, publish it to your local Maven repository (`android/build.gradle` also looks in `mavenLocal()`):
+## FFmpegKit build
 
-```bash
-./scripts/build-ffmpeg-android.sh
-./scripts/publish-ffmpegkit-android.sh local
-```
-
-## Building FFmpegKit
-
-The scripts build the archived [arthenica/ffmpeg-kit](https://github.com/arthenica/ffmpeg-kit) at a fixed commit (FFmpeg 6.0, libvpx 1.13.0), configured with `--disable-everything` plus what the player needs: the WebM demuxer, the libvpx VP9 decoder, rawvideo output, the file and pipe protocols, and a few filters. The result is about 4 MB for Android (four ABIs) and 11 MB for iOS, against 31 MB and 60 MB for a default `--enable-libvpx` build. The configure options are in `scripts/ffmpegkit-common.sh`.
-
-### Android
-
-Needs the Android SDK, an NDK (the newest one under `$ANDROID_HOME/ndk` is used; override with `FFMPEGKIT_NDK_HOME`) and Java 17. NDK r28 or newer links with 16 KB pages, and the script checks the 64-bit libraries for it. Output: `android/libs/ffmpegkit.aar`.
-
-```bash
-./scripts/build-ffmpeg-android.sh            # CLEAN=1 to start from scratch
-./scripts/publish-ffmpegkit-android.sh local # or central, with Maven Central credentials
-```
-
-### iOS
-
-Needs Xcode. Output: `ios/Frameworks/*.xcframework` (arm64 devices and arm64/x86_64 simulators).
-
-```bash
-./scripts/build-ffmpeg-ios.sh
-```
-
-`./scripts/package-ffmpegkit-sources.sh` packs the corresponding source of the binaries for a release.
+Both platforms use [ffmpegkit-vp9](https://github.com/MediaCacheDev/ffmpegkit-vp9): the archived [arthenica/ffmpeg-kit](https://github.com/arthenica/ffmpeg-kit) at a fixed commit (FFmpeg 6.0, libvpx 1.13.0), configured with `--disable-everything` plus what the player needs: the WebM demuxer, the libvpx VP9 decoder, rawvideo output, the file and pipe protocols, and a few filters. It is about 4 MB for Android (four ABIs) and 11 MB for iOS, against 31 MB and 60 MB for a default `--enable-libvpx` build. Its build scripts, notices and sources are in that repository.
 
 ## Usage
 

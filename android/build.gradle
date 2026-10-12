@@ -44,15 +44,15 @@ android {
 repositories {
     google()
     mavenCentral()
-    // Until dev.mediacache:ffmpegkit-vp9 is on Maven Central:
-    // scripts/build-ffmpeg-android.sh && scripts/publish-ffmpegkit-android.sh local
+    // Until dev.mediacache:ffmpegkit-vp9 is on Maven Central, publish it locally from
+    // github.com/MediaCacheDev/ffmpegkit-vp9 (scripts/publish-android.sh local)
     mavenLocal()
 }
 
 dependencies {
     implementation 'com.facebook.react:react-native:+'
     
-    // FFmpegKit with a VP9-only FFmpeg (scripts/build-ffmpeg-android.sh). Brings in
+    // FFmpegKit with a VP9-only FFmpeg (github.com/MediaCacheDev/ffmpegkit-vp9). Brings in
     // com.arthenica:smart-exception-java through its POM.
     implementation 'dev.mediacache:ffmpegkit-vp9:6.0.0'
 }

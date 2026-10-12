@@ -1,6 +1,6 @@
 # Third-party notices
 
-The code in this repository is MIT-licensed (see `LICENSE`). The FFmpegKit binaries it uses are not:
+The code in this repository is MIT-licensed (see `LICENSE`). The FFmpegKit binaries it uses, [ffmpegkit-vp9](https://github.com/MediaCacheDev/ffmpegkit-vp9) 6.0.0, are not:
 
 | Component | Version | Licence | Where |
 |---|---|---|---|
@@ -13,11 +13,11 @@ Licence texts: `licenses/LGPL-3.0.txt`, `licenses/GPL-3.0.txt` (LGPL-3.0 is writ
 
 ## What the build contains
 
-FFmpeg is configured with `--disable-everything` and only the components the player uses: the Matroska/WebM demuxer, the VP9 parser, the libvpx VP9 decoder, the rawvideo encoder and muxer, the file and pipe protocols, and the filters FFmpeg's command line needs to build a filter graph. No GPL code is enabled (no `--enable-gpl`). The exact options are in `scripts/ffmpegkit-common.sh`, and `scripts/build-ffmpeg-android.sh` and `scripts/build-ffmpeg-ios.sh` reproduce the binaries.
+FFmpeg is configured with `--disable-everything` and only the components the player uses: the Matroska/WebM demuxer, the VP9 parser, the libvpx VP9 decoder, the rawvideo encoder and muxer, the file and pipe protocols, and the filters FFmpeg's command line needs to build a filter graph. No GPL code is enabled (no `--enable-gpl`). The exact options and the scripts that reproduce the binaries are in the [ffmpegkit-vp9](https://github.com/MediaCacheDev/ffmpegkit-vp9) repository.
 
 ## Source code
 
-The complete corresponding source (ffmpeg-kit at the commit above, FFmpeg 6.0, libvpx 1.13.0 and cpu_features 0.8.0 as fetched by ffmpeg-kit, and these build scripts) is attached to each release at <https://github.com/danielkpl2/react-native-webm-alpha-player-java-swift/releases>.
+The complete corresponding source (ffmpeg-kit at the commit above, FFmpeg 6.0, libvpx 1.13.0 and cpu_features 0.8.0 as fetched by ffmpeg-kit, and the build scripts) is attached to the release at <https://github.com/MediaCacheDev/ffmpegkit-vp9/releases/tag/6.0.0>.
 
 ## Replacing the libraries
 

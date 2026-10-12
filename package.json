@@ -17,9 +17,7 @@
     "licenses"
   ],
   "scripts": {
-    "build:ffmpeg:android": "./scripts/build-ffmpeg-android.sh",
-    "build:ffmpeg:ios": "./scripts/build-ffmpeg-ios.sh",
-    "build:ffmpeg": "npm run build:ffmpeg:android && npm run build:ffmpeg:ios",
+    "fetch:ffmpegkit:ios": "./scripts/fetch-ffmpegkit-ios.sh",
     "prepack": "echo 'Packing react-native-webm-alpha-player-js...'"
   },
   "repository": {

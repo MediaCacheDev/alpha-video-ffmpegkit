@@ -33,7 +33,7 @@ Pod::Spec.new do |s|
 
   s.static_framework = true
 
-  # FFmpegKit with a VP9-only FFmpeg, built by scripts/build-ffmpeg-ios.sh. These are dynamic
+  # FFmpegKit with a VP9-only FFmpeg (ffmpegkit-vp9, scripts/fetch-ffmpegkit-ios.sh). These are dynamic
   # frameworks (LGPL: users can replace them); CocoaPods embeds them in the app.
   s.vendored_frameworks = [
     "ios/Frameworks/ffmpegkit.xcframework",
