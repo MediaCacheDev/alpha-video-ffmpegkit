@@ -27,6 +27,8 @@ Pod::Spec.new do |s|
     "ios/WebMAlphaCPUView.swift",
     "ios/WebMAlphaGPUView.swift",
     "ios/WebMSourceResolver.swift",
+    "ios/FrameStream.swift",
+    "ios/VideoProbe.swift",
     "ios/WebMAlphaPlayer-Bridging-Header.h"
   ]
   s.swift_version = "5.0"

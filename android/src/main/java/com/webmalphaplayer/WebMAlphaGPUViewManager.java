@@ -71,6 +71,16 @@ public class WebMAlphaGPUViewManager extends SimpleViewManager<WebMAlphaGPUView>
     public void setVerbose(WebMAlphaGPUView view, boolean verbose) {
         view.setVerbose(verbose);
     }
+
+    @ReactProp(name = "mode")
+    public void setMode(WebMAlphaGPUView view, @Nullable String mode) {
+        view.setMode(mode);
+    }
+
+    @ReactProp(name = "streamBufferFrames", defaultInt = StreamMode.DEFAULT_BUFFER_FRAMES)
+    public void setStreamBufferFrames(WebMAlphaGPUView view, int frames) {
+        view.setStreamBufferFrames(frames);
+    }
     
     /** TextureView can't have a background drawable; setting one throws. */
     @ReactProp(name = "backgroundColor", customType = "Color")

@@ -33,6 +33,8 @@ function unwrap(handler) {
  * - cacheKey: file name for the downloaded copy, relative to the cache directory. Overrides
  *   source.cacheKey. Ignored on web.
  * - autoPlay (true), loop (true), paused (false), verbose (false: only errors are logged)
+ * - mode: 'stream' (default: decode while playing, holding streamBufferFrames (15) frames ahead)
+ *   or 'preload' (decode every frame, then play). Ignored on web.
  * - onLoad({ totalFrames, width, height }), onError({ error }), onEnd({})
  */
 function createPlayer(displayName, pickNative) {
@@ -44,6 +46,8 @@ function createPlayer(displayName, pickNative) {
     useGPU = true,
     cacheKey,
     verbose = false,
+    mode = 'stream',
+    streamBufferFrames = 15,
     style,
     onLoad,
     onError,
@@ -86,6 +90,8 @@ function createPlayer(displayName, pickNative) {
         loop={loop}
         paused={paused}
         verbose={verbose}
+        mode={mode}
+        streamBufferFrames={streamBufferFrames}
         onLoad={unwrap(onLoad)}
         onError={unwrap(onError)}
         onEnd={unwrap(onEnd)}

@@ -12,6 +12,8 @@ export interface NativeProps extends ViewProps {
   paused?: boolean;
   cacheKey?: string;
   verbose?: boolean;
+  mode?: 'preload' | 'stream';
+  streamBufferFrames?: number;
   onLoad?: (event: { nativeEvent: { totalFrames: number; width: number; height: number } }) => void;
   onError?: (event: { nativeEvent: { error: string } }) => void;
   onEnd?: (event: { nativeEvent: {} }) => void;

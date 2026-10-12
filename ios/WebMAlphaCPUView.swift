@@ -32,6 +32,27 @@ private class FrameCacheEntry {
     }
 }
 
+/// Paces stream-mode playback at the clip's frame rate. If the decoder falls more than a frame
+/// behind, the clock restarts from now instead of rushing through frames to catch up.
+private struct FrameClock {
+    private let interval: CFTimeInterval
+    private var next: CFTimeInterval
+
+    init(frameRate: Double) {
+        interval = 1.0 / frameRate
+        next = CACurrentMediaTime() + interval
+    }
+
+    /// Sleeps until the next frame is due.
+    mutating func awaitNextFrame() {
+        let now = CACurrentMediaTime()
+        if now - next > interval { next = now }
+        let sleep = next - now
+        next += interval
+        if sleep > 0 { Thread.sleep(forTimeInterval: sleep) }
+    }
+}
+
 // Configure cache limits
 private func configureFrameCache() {
     frameCache.countLimit = 10 // Max 10 videos cached
@@ -48,6 +69,8 @@ public class WebMAlphaCPUView: UIView {
     private var autoPlay: Bool = true
     private var loop: Bool = true
     private var paused: Bool = false
+    private var stream: Bool = true
+    private var streamBufferFrames = FrameStream.defaultBufferFrames
     @objc public var cacheKey: String?
     @objc public var verbose: Bool = false
     @objc public var onLoad: (([AnyHashable: Any]) -> Void)?
@@ -66,8 +89,10 @@ public class WebMAlphaCPUView: UIView {
     private var videoWidth: Int = 0
     private var videoHeight: Int = 0
     private var frameRate: Double = 30.0
+    /// 0 if the container doesn't say.
+    private var durationSeconds: Double = 0
     private var totalFrames: Int = 0
-
+    
     // Memory warning observer
     private var memoryWarningObserver: NSObjectProtocol?
     
@@ -180,6 +205,21 @@ public class WebMAlphaCPUView: UIView {
         paused = value
         updatePlaybackState()
     }
+
+    /// "stream" (default) or "preload"; changing it restarts playback.
+    @objc func setMode(_ value: NSString?) {
+        let isStream = (value as String?) != "preload"
+        guard isStream != stream else { return }
+        stream = isStream
+        guard isPlaying || isDecoding else { return }
+        cleanup()
+        startPlayback()
+    }
+
+    /// Decoded frames held ahead of playback in stream mode; applies from the next start.
+    @objc func setStreamBufferFrames(_ value: Int) {
+        streamBufferFrames = value
+    }
     
     private func updatePlaybackState() {
         if paused {
@@ -197,6 +237,11 @@ public class WebMAlphaCPUView: UIView {
         generation += 1
         let gen = generation
         let key = cacheKey
+
+        if stream {
+            startStream(source: source, cacheKey: key, gen: gen)
+            return
+        }
         
         // Check if frames are already cached
         if let cached = frameCache.object(forKey: hash as NSString) {
@@ -238,7 +283,9 @@ public class WebMAlphaCPUView: UIView {
         isPlaying = false
     }
     
-    private func decodeAndPlay(source: String, cacheKey: String?, hash: String, gen: Int) {
+    /// Downloads the source if it's remote and reads its size and frame rate. Nil after an
+    /// error (already reported) or a stop.
+    private func resolveAndProbe(source: String, cacheKey: String?, gen: Int) -> String? {
         let localPath: String
         do {
             localPath = try WebMSourceResolver.localPath(for: source, cacheKey: cacheKey) { [weak self] in
@@ -246,17 +293,88 @@ public class WebMAlphaCPUView: UIView {
             }
         } catch {
             if !isStopped(gen) { emitError("Failed to load \(source): \(error.localizedDescription)", gen: gen) }
-            return
+            return nil
         }
         
-        guard !isStopped(gen) else { return }
+        guard !isStopped(gen) else { return nil }
         
         guard probeVideo(path: localPath) else {
             if !isStopped(gen) { emitError("Failed to probe \(source)", gen: gen) }
-            return
+            return nil
         }
         
+        return isStopped(gen) ? nil : localPath
+    }
+
+    /// Stream mode: probe on the shared FFmpeg queue, then decode and play on this view's
+    /// playback queue, so a long stream doesn't hold up other views' decodes.
+    private func startStream(source: String, cacheKey: String?, gen: Int) {
+        isDecoding = true
+        sharedFFmpegQueue.async { [weak self] in
+            guard let self = self else { return }
+            let localPath = self.isStopped(gen) ? nil : self.resolveAndProbe(source: source, cacheKey: cacheKey, gen: gen)
+            DispatchQueue.main.async {
+                guard self.generation == gen else { return }
+                self.isDecoding = false
+                guard let localPath = localPath, !self.isStopped(gen) else { return }
+                self.isPlaying = true
+                let bufferFrames = self.streamBufferFrames
+                self.playbackQueue?.async { [weak self] in
+                    self?.playStream(path: localPath, source: source, bufferFrames: bufferFrames, gen: gen)
+                    DispatchQueue.main.async {
+                        if self?.generation == gen { self?.isPlaying = false }
+                    }
+                }
+            }
+        }
+    }
+
+    /// onLoad comes with the first frame, and totalFrames is estimated from the duration.
+    private func playStream(path: String, source: String, bufferFrames: Int, gen: Int) {
+        let frames = FrameStream(
+            path: path, outputOptions: "-vf format=rgba -f rawvideo",
+            frameSize: videoWidth * videoHeight * 4, bufferFrames: bufferFrames,
+            loop: { [weak self] in self?.loop ?? false })
+        defer { frames.close() }
+
+        var clock = FrameClock(frameRate: frameRate)
+        var loaded = false
+        do {
+            while let frame = try frames.next(isCancelled: { [weak self] in self?.isStopped(gen) ?? true }) {
+                let image = autoreleasepool {
+                    createImage(from: Data(bytesNoCopy: frame.bytes, count: frame.count, deallocator: .none))
+                }
+                frames.recycle(frame)
+                if !loaded {
+                    emitLoad(frames: Int((durationSeconds * frameRate).rounded()), gen: gen)
+                    loaded = true
+                }
+                if let image = image {
+                    DispatchQueue.main.async { [weak self] in
+                        guard self?.isStopped(gen) == false else { return }
+                        self?.imageView.image = image
+                    }
+                }
+                clock.awaitNextFrame()
+            }
+        } catch {
+            if !isStopped(gen) { emitError("Failed to decode \(source): \(error.localizedDescription)", gen: gen) }
+            return
+        }
+
         guard !isStopped(gen) else { return }
+        guard loaded else {
+            emitError("No frames decoded from \(source)", gen: gen)
+            return
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, self.generation == gen else { return }
+            self.onEnd?([:])
+        }
+    }
+    
+    private func decodeAndPlay(source: String, cacheKey: String?, hash: String, gen: Int) {
+        guard let localPath = resolveAndProbe(source: source, cacheKey: cacheKey, gen: gen) else { return }
         
         // Create temp directory for frames
         let framesDir = FileManager.default.temporaryDirectory
@@ -370,45 +488,17 @@ public class WebMAlphaCPUView: UIView {
     }
     
     private func probeVideo(path: String) -> Bool {
-        let probeCmd = "-v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate -of csv=p=0 \"\(path)\""
+        let probeCmd = "-v error -select_streams v:0 -show_entries stream=width,height,avg_frame_rate,r_frame_rate:format=duration -of default=noprint_wrappers=1 \"\(path)\""
         
         guard let output = executeFFprobe(command: probeCmd) else {
             return false
         }
         
-        let trimmedOutput = output.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-        guard !trimmedOutput.isEmpty else {
-            return false
-        }
-        
-        // Parse output: width,height,fps_num/fps_den
-        let lines = trimmedOutput.components(separatedBy: "\n")
-        guard let lastLine = lines.last, !lastLine.isEmpty else { return false }
-        
-        let parts = lastLine.components(separatedBy: ",")
-        guard parts.count >= 3 else { return false }
-        
-        guard let width = Int(parts[0].trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)),
-              let height = Int(parts[1].trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)) else {
-            return false
-        }
-        
-        videoWidth = width
-        videoHeight = height
-        
-        // Parse frame rate
-        let fps = parts[2].trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
-        if fps.contains("/") {
-            let fpsParts = fps.components(separatedBy: "/")
-            if fpsParts.count == 2,
-               let num = Double(fpsParts[0]),
-               let den = Double(fpsParts[1]),
-               den > 0 {
-                frameRate = num / den
-            }
-        } else if let rate = Double(fps) {
-            frameRate = rate
-        }
+        let values = VideoProbe.keyValues(output)
+        videoWidth = values["width"].flatMap { Int($0) } ?? 0
+        videoHeight = values["height"].flatMap { Int($0) } ?? 0
+        frameRate = VideoProbe.frameRate(average: values["avg_frame_rate"], base: values["r_frame_rate"])
+        durationSeconds = max(0, values["duration"].flatMap { Double($0) } ?? 0)
         
         log("Video: \(videoWidth)x\(videoHeight) @ \(frameRate)fps")
         return videoWidth > 0 && videoHeight > 0

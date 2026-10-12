@@ -31,7 +31,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  * 
  * Features:
  * - True VP9+alpha decoding via FFmpeg's libvpx
- * - Frames are decoded once to a raw RGBA file in the cache and read back one at a time
+ * - Preload mode: frames are decoded once to a raw RGBA file in the cache and read back one at a time
+ * - Stream mode: frames are decoded while playing, into a few reused buffers (see {@link FrameStream})
  * - Sources: https (downloaded to the cache), files, asset://, res/raw names and content://
  * - Looping support
  * 
@@ -45,6 +46,8 @@ public class WebMAlphaCPUView extends TextureView implements TextureView.Surface
     private boolean autoPlay = true;
     private boolean loop = true;
     private boolean paused = false;
+    private boolean stream = true;
+    private int streamBufferFrames = StreamMode.DEFAULT_BUFFER_FRAMES;
     
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private ExecutorService executor;
@@ -140,6 +143,25 @@ public class WebMAlphaCPUView extends TextureView implements TextureView.Surface
         this.paused = paused;
         updatePlaybackState();
     }
+
+    /** {@code "stream"} (default) or {@code "preload"}; changing it restarts playback. */
+    public void setMode(@Nullable String mode) {
+        boolean stream = StreamMode.isStream(mode);
+        if (stream == this.stream) return;
+        this.stream = stream;
+        restartPlayback();
+    }
+
+    /** Decoded frames held ahead of playback in stream mode; applies from the next start. */
+    public void setStreamBufferFrames(int frames) {
+        this.streamBufferFrames = frames;
+    }
+
+    private void restartPlayback() {
+        if (!isPlaying.get()) return;
+        stopPlayback();
+        startPlayback();
+    }
     
     /**
      * Set custom cache key for remote downloads.
@@ -209,6 +231,11 @@ public class WebMAlphaCPUView extends TextureView implements TextureView.Surface
         frameRate = info.frameRate;
         logD("Video: " + videoWidth + "x" + videoHeight + " @ " + frameRate + "fps");
         if (stopRequested()) return;
+        if (stream) {
+            totalFrames = info.estimatedFrames();
+            playStream(local, source);
+            return;
+        }
         
         File framesDir = new File(getContext().getCacheDir(), "webm-frames-" + System.currentTimeMillis());
         framesDir.mkdirs();
@@ -287,6 +314,36 @@ public class WebMAlphaCPUView extends TextureView implements TextureView.Surface
             if (!stopRequested()) reportEnd();
         } catch (Exception e) {
             Log.e(TAG, "Error playing frames", e);
+        }
+    }
+    
+    /** onLoad comes with the first frame, and totalFrames is estimated from the duration. */
+    private void playStream(WebMSource local, String source) {
+        int frameSize = videoWidth * videoHeight * 4;
+        int[] pixelBuffer = new int[videoWidth * videoHeight];
+        boolean loaded = false;
+        try (FrameStream frames = FrameStream.start(getContext(), local, "-vf format=rgba -f rawvideo",
+                frameSize, streamBufferFrames, () -> loop, this::stopRequested)) {
+            FrameClock clock = new FrameClock(frameRate);
+            byte[] frame;
+            while ((frame = frames.next()) != null) {
+                convertRGBAtoARGB(frame, pixelBuffer);
+                frames.recycle(frame);
+                if (!loaded) {
+                    reportLoad();
+                    loaded = true;
+                }
+                renderFrame(pixelBuffer);
+                if (!clock.awaitNextFrame()) return;
+            }
+            if (stopRequested()) return;
+            if (loaded) {
+                reportEnd();
+            } else {
+                reportError("No frames decoded from " + source);
+            }
+        } catch (IOException e) {
+            if (!stopRequested()) reportError("Failed to decode " + source + ": " + e.getMessage());
         }
     }
     

@@ -70,11 +70,35 @@ export interface WebMAlphaViewProps {
   verbose?: boolean;
 
   /**
+   * - `'stream'`: decode while playing, holding `streamBufferFrames` frames ahead. Playback
+   *   starts after the first frame and memory stays flat however long the clip is, but decoding
+   *   runs for as long as the clip plays, and each loop decodes the clip again.
+   * - `'preload'`: decode every frame before playing (to a raw file on Android CPU, into
+   *   textures on Android GPU, into memory on iOS). Loops cost nothing, but memory and the wait
+   *   before the first frame grow with the clip. Suits short clips that loop for a long time.
+   *
+   * An http(s) source is still downloaded completely first. Ignored on web.
+   * @default 'stream'
+   */
+  mode?: 'preload' | 'stream';
+
+  /**
+   * Decoded frames held ahead of playback in `'stream'` mode. Each costs width × height × 4
+   * bytes on the CPU views and width × height × 2.5 on the GPU views. More frames absorb decoder
+   * hiccups and the restart at each loop. Applies from the next start.
+   * @default 15
+   */
+  streamBufferFrames?: number;
+
+  /**
    * View style
    */
   style?: StyleProp<ViewStyle>;
 
-  /** All frames are decoded and playback is starting. On web, totalFrames assumes 30 fps. */
+  /**
+   * Playback is starting: in `'preload'` mode all frames are decoded; in `'stream'` mode the
+   * first one is, and totalFrames is estimated from the duration. On web, totalFrames assumes 30 fps.
+   */
   onLoad?: (event: WebMAlphaLoadEvent) => void;
 
   /** The source could not be resolved, downloaded or decoded. */

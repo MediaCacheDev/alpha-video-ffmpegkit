@@ -141,6 +141,14 @@ private class GPUTextureCache {
     }
 }
 
+/// The Y, U, V and A planes of one frame.
+private struct PlaneTextures {
+    let y: MTLTexture
+    let u: MTLTexture
+    let v: MTLTexture
+    let a: MTLTexture
+}
+
 /// Cache for GPU texture arrays - keyed by source hash
 private var gpuTextureCache = NSCache<NSString, GPUTextureCache>()
 
@@ -181,9 +189,22 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
     // GPU texture cache for current video - all frames live on GPU
     private var currentTextureCache: GPUTextureCache?
 
+    // Stream mode: frames are uploaded in turn into a few texture sets, so the one being
+    // written isn't one the GPU may still be drawing.
+    private static let streamTextureSets = 3
+    private var stream = true
+    private var streamBufferFrames = FrameStream.defaultBufferFrames
+    private var frameStream: FrameStream?
+    private var streamTextures: [PlaneTextures] = []
+    private var nextStreamSet = 0
+    private var currentStreamTextures: PlaneTextures?
+    private var streamLoaded = false
+
     // Video dimensions
     private var videoWidth: Int = 0
     private var videoHeight: Int = 0
+    /// 0 if the container doesn't say.
+    private var durationSeconds: Double = 0
 
     private let decodeQueue = DispatchQueue(label: "com.webmalphaplayer.metal.decode", qos: .userInitiated)
 
@@ -264,6 +285,21 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
         }
     }
 
+    /// "stream" (default) or "preload"; changing it restarts playback.
+    @objc public func setMode(_ value: NSString?) {
+        let isStream = (value as String?) != "preload"
+        guard isStream != stream else { return }
+        stream = isStream
+        guard isPlaying || isDecoding else { return }
+        stop()
+        play()
+    }
+
+    /// Decoded frames held ahead of playback in stream mode; applies from the next start.
+    @objc public func setStreamBufferFrames(_ value: Int) {
+        streamBufferFrames = value
+    }
+
     @objc public func play() {
         guard !isPlaying, !isDecoding, let source = source, let hash = sourceHash else { return }
 
@@ -271,6 +307,11 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
         generation += 1
         let gen = generation
         let key = cacheKey
+
+        if stream {
+            startStream(source: source, cacheKey: key, gen: gen)
+            return
+        }
 
         // Check GPU texture cache first - instant playback if cached
         if let cachedTextures = gpuTextureCache.object(forKey: hash as NSString) {
@@ -291,16 +332,147 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
                     self.startPlaying(textures)
                 }
             } catch {
-                guard !self.isStopped(gen) else { return }
-                let message = "Failed to play \(source): \(error.localizedDescription)"
-                NSLog("[WebMAlphaGPUView] %@", message)
-                DispatchQueue.main.async {
-                    guard !self.isStopped(gen) else { return }
-                    self.isDecoding = false
-                    self.onError?(["error": message])
-                }
+                self.reportDecodeError(error, source: source, gen: gen)
             }
         }
+    }
+
+    private func reportDecodeError(_ error: Error, source: String, gen: Int) {
+        guard !isStopped(gen) else { return }
+        let message = "Failed to play \(source): \(error.localizedDescription)"
+        NSLog("[WebMAlphaGPUView] %@", message)
+        DispatchQueue.main.async {
+            guard !self.isStopped(gen) else { return }
+            self.isDecoding = false
+            self.onError?(["error": message])
+        }
+    }
+
+    /// Stream mode: resolve and probe on the decode queue, then decode while the display link
+    /// shows frames. onLoad comes with the first frame, and totalFrames is estimated from the duration.
+    private func startStream(source: String, cacheKey: String?, gen: Int) {
+        isDecoding = true
+        let bufferFrames = streamBufferFrames
+        decodeQueue.async { [weak self] in
+            guard let self = self, !self.isStopped(gen) else { return }
+            do {
+                let filePath = try WebMSourceResolver.localPath(for: source, cacheKey: cacheKey) { [weak self] in
+                    self?.isStopped(gen) ?? true
+                }
+                guard self.probeVideo(path: filePath) else {
+                    throw WebMSourceError(message: "Could not read video size and frame rate")
+                }
+                self.log("Streaming: \(self.videoWidth)x\(self.videoHeight) @ \(self.frameRate)fps")
+                let uvSize = (self.videoWidth / 2) * (self.videoHeight / 2)
+                let frames = FrameStream(
+                    path: filePath, outputOptions: "-f rawvideo -pix_fmt yuva420p",
+                    frameSize: self.videoWidth * self.videoHeight * 2 + uvSize * 2, bufferFrames: bufferFrames,
+                    loop: { [weak self] in self?.loop ?? false })
+                DispatchQueue.main.async {
+                    guard !self.isStopped(gen) else {
+                        frames.close()
+                        return
+                    }
+                    self.isDecoding = false
+                    self.startStreaming(frames, source: source)
+                }
+            } catch {
+                self.reportDecodeError(error, source: source, gen: gen)
+            }
+        }
+    }
+
+    private func startStreaming(_ frames: FrameStream, source: String) {
+        guard let device = sharedMetalDevice, let textureSets = makeStreamTextures(device: device) else {
+            frames.close()
+            onError?(["error": "Failed to play \(source): could not create Metal textures"])
+            return
+        }
+        frameStream = frames
+        streamTextures = textureSets
+        nextStreamSet = 0
+        currentStreamTextures = nil
+        streamLoaded = false
+        frameInterval = 1.0 / frameRate
+        isPlaying = true
+        startDisplayLink()
+    }
+
+    private func makeStreamTextures(device: MTLDevice) -> [PlaneTextures]? {
+        var sets: [PlaneTextures] = []
+        for _ in 0..<Self.streamTextureSets {
+            guard let y = createTexture(device: device, width: videoWidth, height: videoHeight),
+                  let u = createTexture(device: device, width: videoWidth / 2, height: videoHeight / 2),
+                  let v = createTexture(device: device, width: videoWidth / 2, height: videoHeight / 2),
+                  let a = createTexture(device: device, width: videoWidth, height: videoHeight) else {
+                return nil
+            }
+            sets.append(PlaneTextures(y: y, u: u, v: v, a: a))
+        }
+        return sets
+    }
+
+    /// Called on display link ticks when a frame is due. If the decoder is behind, the last
+    /// frame stays on screen.
+    private func showNextStreamFrame(_ frames: FrameStream) {
+        let poll: FrameStream.Poll
+        do {
+            poll = try frames.poll()
+        } catch {
+            let message = "Failed to play \(source ?? ""): \(error.localizedDescription)"
+            NSLog("[WebMAlphaGPUView] %@", message)
+            stop()
+            onError?(["error": message])
+            return
+        }
+
+        switch poll {
+        case .waiting:
+            return
+        case .ended:
+            let played = streamLoaded
+            stop()
+            if played {
+                onEnd?([:])
+            } else {
+                onError?(["error": "No frames decoded from \(source ?? "")"])
+            }
+        case .frame(let frame):
+            let textures = streamTextures[nextStreamSet]
+            nextStreamSet = (nextStreamSet + 1) % streamTextures.count
+            upload(frame, into: textures)
+            frames.recycle(frame)
+            currentStreamTextures = textures
+            if !streamLoaded {
+                streamLoaded = true
+                let totalFrames = Int((durationSeconds * frameRate).rounded())
+                onLoad?(["totalFrames": totalFrames, "width": videoWidth, "height": videoHeight])
+            }
+            metalView.setNeedsDisplay()
+        }
+    }
+
+    private func upload(_ frame: StreamFrame, into textures: PlaneTextures) {
+        let uvWidth = videoWidth / 2
+        let uvHeight = videoHeight / 2
+        let ySize = videoWidth * videoHeight
+        let uvSize = uvWidth * uvHeight
+        let base = UnsafeRawPointer(frame.bytes)
+        textures.y.replace(region: MTLRegionMake2D(0, 0, videoWidth, videoHeight), mipmapLevel: 0,
+                           withBytes: base, bytesPerRow: videoWidth)
+        textures.u.replace(region: MTLRegionMake2D(0, 0, uvWidth, uvHeight), mipmapLevel: 0,
+                           withBytes: base + ySize, bytesPerRow: uvWidth)
+        textures.v.replace(region: MTLRegionMake2D(0, 0, uvWidth, uvHeight), mipmapLevel: 0,
+                           withBytes: base + ySize + uvSize, bytesPerRow: uvWidth)
+        textures.a.replace(region: MTLRegionMake2D(0, 0, videoWidth, videoHeight), mipmapLevel: 0,
+                           withBytes: base + ySize + uvSize * 2, bytesPerRow: videoWidth)
+    }
+
+    private func closeStream() {
+        frameStream?.close()
+        frameStream = nil
+        streamTextures = []
+        currentStreamTextures = nil
     }
 
     private func startPlaying(_ textures: GPUTextureCache) {
@@ -323,13 +495,16 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
         isDecoding = false
         currentFrameIndex = 0
         stopDisplayLink()
+        closeStream()
     }
     
     private func startDisplayLink() {
         guard displayLink == nil else { return }
         
         displayLink = CADisplayLink(target: self, selector: #selector(displayLinkFired))
-        displayLink?.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: Float(frameRate), preferred: Float(frameRate))
+        // The display link only has to tick as often as the clip's frames change.
+        let rate = Float(frameRate)
+        displayLink?.preferredFrameRateRange = CAFrameRateRange(minimum: min(rate, 30), maximum: rate, preferred: rate)
         displayLink?.add(to: .main, forMode: .common)
         lastFrameTime = CACurrentMediaTime()
         frameInterval = 1.0 / frameRate
@@ -341,7 +516,7 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
     }
     
     @objc private func displayLinkFired(_ link: CADisplayLink) {
-        guard isPlaying, !shouldStop, !paused, let cache = currentTextureCache else {
+        guard isPlaying, !shouldStop, !paused, frameStream != nil || currentTextureCache != nil else {
             return
         }
         
@@ -351,6 +526,12 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
         // Check if enough time has passed for next frame
         if elapsed >= frameInterval {
             lastFrameTime = currentTime - (elapsed.truncatingRemainder(dividingBy: frameInterval))
+
+            if let frames = frameStream {
+                showNextStreamFrame(frames)
+                return
+            }
+            guard let cache = currentTextureCache else { return }
             
             // Just trigger redraw - textures already on GPU, no upload needed!
             metalView.setNeedsDisplay()
@@ -520,21 +701,29 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
 
     public func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
+    /// The latest streamed frame, or the current frame of the texture cache.
+    private func texturesToDraw() -> PlaneTextures? {
+        if let streamed = currentStreamTextures { return streamed }
+        guard let cache = currentTextureCache, currentFrameIndex < cache.frameCount else { return nil }
+        return PlaneTextures(
+            y: cache.yTextures[currentFrameIndex],
+            u: cache.uTextures[currentFrameIndex],
+            v: cache.vTextures[currentFrameIndex],
+            a: cache.aTextures[currentFrameIndex])
+    }
+
     public func draw(in view: MTKView) {
         guard let pipeline = sharedPipelineState,
               let commandQueue = sharedCommandQueue,
               let drawable = view.currentDrawable,
               let renderPassDescriptor = view.currentRenderPassDescriptor,
-              let cache = currentTextureCache,
-              currentFrameIndex < cache.frameCount else {
+              let textures = texturesToDraw() else {
             return
         }
-        
-        // Get textures for current frame from GPU cache - NO upload needed!
-        let yTex = cache.yTextures[currentFrameIndex]
-        let uTex = cache.uTextures[currentFrameIndex]
-        let vTex = cache.vTextures[currentFrameIndex]
-        let aTex = cache.aTextures[currentFrameIndex]
+        let yTex = textures.y
+        let uTex = textures.u
+        let vTex = textures.v
+        let aTex = textures.a
 
         renderPassDescriptor.colorAttachments[0].loadAction = .clear
         renderPassDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
@@ -569,27 +758,23 @@ public class WebMAlphaGPUView: UIView, MTKViewDelegate {
             return false
         }
 
+        durationSeconds = (json["format"] as? [String: Any])
+            .flatMap { $0["duration"] as? String }
+            .flatMap(Double.init) ?? 0
+
         for stream in streams {
             if let codecType = stream["codec_type"] as? String, codecType == "video" {
                 videoWidth = stream["width"] as? Int ?? 0
                 videoHeight = stream["height"] as? Int ?? 0
 
-                if let frameRateStr = stream["r_frame_rate"] as? String,
-                   let frameRateVal = parseFrameRate(frameRateStr) {
-                    frameRate = frameRateVal
-                }
+                frameRate = VideoProbe.frameRate(
+                    average: stream["avg_frame_rate"] as? String, base: stream["r_frame_rate"] as? String)
 
                 return videoWidth > 0 && videoHeight > 0
             }
         }
 
         return false
-    }
-
-    private func parseFrameRate(_ rateStr: String) -> Double? {
-        let components = rateStr.split(separator: "/").compactMap { Double($0) }
-        guard components.count == 2, components[1] != 0 else { return nil }
-        return components[0] / components[1]
     }
 
     private func log(_ message: @autoclosure () -> String) {

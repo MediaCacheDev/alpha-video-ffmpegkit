@@ -38,6 +38,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * This provides ~3-5x better performance for the color conversion step
  * compared to the CPU-based RGBA conversion.
+ *
+ * In preload mode every frame is uploaded to its own textures before playback starts. In stream
+ * mode frames are decoded while playing (see {@link FrameStream}) and uploaded one at a time.
  */
 public class WebMAlphaGPUView extends TextureView implements TextureView.SurfaceTextureListener {
     private static final String TAG = "WebMAlphaGPUView";
@@ -47,6 +50,8 @@ public class WebMAlphaGPUView extends TextureView implements TextureView.Surface
     private boolean autoPlay = true;
     private boolean loop = true;
     private boolean paused = false;
+    private boolean stream = true;
+    private int streamBufferFrames = StreamMode.DEFAULT_BUFFER_FRAMES;
     
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private ExecutorService executor;
@@ -210,6 +215,25 @@ public class WebMAlphaGPUView extends TextureView implements TextureView.Surface
         this.paused = paused;
         updatePlaybackState();
     }
+
+    /** {@code "stream"} (default) or {@code "preload"}; changing it restarts playback. */
+    public void setMode(@Nullable String mode) {
+        boolean stream = StreamMode.isStream(mode);
+        if (stream == this.stream) return;
+        this.stream = stream;
+        restartPlayback();
+    }
+
+    /** Decoded frames held ahead of playback in stream mode; applies from the next start. */
+    public void setStreamBufferFrames(int frames) {
+        this.streamBufferFrames = frames;
+    }
+
+    private void restartPlayback() {
+        if (!isPlaying.get()) return;
+        stopPlayback();
+        startPlayback();
+    }
     
     /**
      * Set custom cache key for remote downloads.
@@ -284,6 +308,11 @@ public class WebMAlphaGPUView extends TextureView implements TextureView.Surface
         SurfaceTexture surfaceTexture = getSurfaceTexture();
         if (surfaceTexture == null || !initGL(surfaceTexture)) {
             if (!stopRequested()) reportError("Failed to initialize OpenGL ES");
+            return;
+        }
+        if (stream) {
+            totalFrames = info.estimatedFrames();
+            playStream(local, source);
             return;
         }
         
@@ -578,6 +607,77 @@ public class WebMAlphaGPUView extends TextureView implements TextureView.Surface
         
         if (!stopRequested()) reportEnd();
     }
+
+    /**
+     * Stream mode: each frame is uploaded into the same four textures just before it's drawn.
+     * onLoad comes with the first frame, and totalFrames is estimated from the duration.
+     */
+    private void playStream(WebMSource local, String source) {
+        int uvWidth = videoWidth / 2;
+        int uvHeight = videoHeight / 2;
+        int ySize = videoWidth * videoHeight;
+        int uvSize = uvWidth * uvHeight;
+        int frameSize = ySize + uvSize + uvSize + ySize;
+
+        int[] texIds = new int[4];
+        GLES20.glGenTextures(4, texIds, 0);
+        createPlaneTexture(texIds[0], videoWidth, videoHeight);
+        createPlaneTexture(texIds[1], uvWidth, uvHeight);
+        createPlaneTexture(texIds[2], uvWidth, uvHeight);
+        createPlaneTexture(texIds[3], videoWidth, videoHeight);
+        ByteBuffer planeBuffer = ByteBuffer.allocateDirect(ySize).order(ByteOrder.nativeOrder());
+        GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1);
+
+        boolean loaded = false;
+        try (FrameStream frames = FrameStream.start(getContext(), local, "-f rawvideo -pix_fmt yuva420p",
+                frameSize, streamBufferFrames, () -> loop, this::stopRequested)) {
+            FrameClock clock = new FrameClock(frameRate);
+            byte[] frame;
+            while ((frame = frames.next()) != null) {
+                uploadPlane(texIds[0], planeBuffer, frame, 0, videoWidth, videoHeight);
+                uploadPlane(texIds[1], planeBuffer, frame, ySize, uvWidth, uvHeight);
+                uploadPlane(texIds[2], planeBuffer, frame, ySize + uvSize, uvWidth, uvHeight);
+                uploadPlane(texIds[3], planeBuffer, frame, ySize + uvSize + uvSize, videoWidth, videoHeight);
+                frames.recycle(frame);
+                if (!loaded) {
+                    reportLoad();
+                    loaded = true;
+                }
+                drawPlanes(texIds);
+                if (!clock.awaitNextFrame()) return;
+            }
+            if (stopRequested()) return;
+            if (loaded) {
+                reportEnd();
+            } else {
+                reportError("No frames decoded from " + source);
+            }
+        } catch (IOException e) {
+            if (!stopRequested()) reportError("Failed to decode " + source + ": " + e.getMessage());
+        } finally {
+            GLES20.glDeleteTextures(4, texIds, 0);
+        }
+    }
+
+    private static void createPlaneTexture(int texId, int width, int height) {
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MAG_FILTER, GLES20.GL_LINEAR);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
+        GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
+        GLES20.glTexImage2D(GLES20.GL_TEXTURE_2D, 0, GLES20.GL_LUMINANCE,
+            width, height, 0, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, null);
+    }
+
+    /** Copies one plane of {@code frame}, starting at {@code offset}, into its texture. */
+    private static void uploadPlane(int texId, ByteBuffer scratch, byte[] frame, int offset, int width, int height) {
+        scratch.clear();
+        scratch.put(frame, offset, width * height);
+        scratch.position(0);
+        GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texId);
+        GLES20.glTexSubImage2D(GLES20.GL_TEXTURE_2D, 0, 0, 0,
+            width, height, GLES20.GL_LUMINANCE, GLES20.GL_UNSIGNED_BYTE, scratch);
+    }
     
     /**
      * Render a single frame from GPU cache - NO texture upload, just bind and draw!
@@ -592,7 +692,11 @@ public class WebMAlphaGPUView extends TextureView implements TextureView.Surface
             hasLoggedFirstFrame = true;
             logD("First frame rendered from the GPU texture cache");
         }
-        
+        drawPlanes(texIds);
+    }
+
+    /** Draws one frame from its Y, U, V and A textures and swaps it onto the view. */
+    private void drawPlanes(int[] texIds) {
         GLES20.glClearColor(0, 0, 0, 0);
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
         GLES20.glViewport(0, 0, getWidth(), getHeight());

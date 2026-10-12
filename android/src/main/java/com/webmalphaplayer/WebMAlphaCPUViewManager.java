@@ -71,6 +71,16 @@ public class WebMAlphaCPUViewManager extends SimpleViewManager<WebMAlphaCPUView>
     public void setVerbose(WebMAlphaCPUView view, boolean verbose) {
         view.setVerbose(verbose);
     }
+
+    @ReactProp(name = "mode")
+    public void setMode(WebMAlphaCPUView view, @Nullable String mode) {
+        view.setMode(mode);
+    }
+
+    @ReactProp(name = "streamBufferFrames", defaultInt = StreamMode.DEFAULT_BUFFER_FRAMES)
+    public void setStreamBufferFrames(WebMAlphaCPUView view, int frames) {
+        view.setStreamBufferFrames(frames);
+    }
     
     /** TextureView can't have a background drawable; setting one throws. */
     @ReactProp(name = "backgroundColor", customType = "Color")
