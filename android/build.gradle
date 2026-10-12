@@ -44,9 +44,6 @@ android {
 repositories {
     google()
     mavenCentral()
-    // Until dev.mediacache:ffmpegkit-vp9 is on Maven Central, publish it locally from
-    // github.com/MediaCacheDev/ffmpegkit-vp9 (scripts/publish-android.sh local)
-    mavenLocal()
 }
 
 dependencies {
