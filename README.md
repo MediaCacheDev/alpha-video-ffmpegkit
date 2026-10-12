@@ -6,7 +6,7 @@ Plays VP9 WebM videos with an alpha channel (transparent video) on Android and i
 |---|---|---|
 | React Native (Android, iOS, web) | npm `react-native-alpha-video-ffmpegkit` | `FFmpegKitAlphaView`, `FFmpegKitAlphaGPUView`, `FFmpegKitAlphaCPUView` |
 | Android | Maven `dev.mediacache:alpha-video-ffmpegkit` | `dev.mediacache.alphavideo.ffmpegkit.FFmpegKitAlphaGPUView`, `…FFmpegKitAlphaCPUView` |
-| iOS | Swift Package Manager, product `AlphaVideoFFmpegKit` | `FFmpegKitAlphaGPUView`, `FFmpegKitAlphaCPUView` |
+| iOS | Swift Package Manager, product `AlphaVideoFFmpegKit`; CocoaPods `alpha-video-ffmpegkit` | `FFmpegKitAlphaGPUView`, `FFmpegKitAlphaCPUView` |
 
 By default clips are decoded while they play, a few frames ahead, so memory stays flat however long the clip is. `mode="preload"` decodes every frame first instead, which suits short clips that loop for a long time (see [Playback modes](#playback-modes)).
 
@@ -80,7 +80,15 @@ targets: [
 ]
 ```
 
-It pulls in [ffmpegkit-vp9](https://github.com/MediaCacheDev/ffmpegkit-vp9) 6.0.0 as dynamic XCFrameworks, which Xcode embeds in the app.
+Or with CocoaPods:
+
+```ruby
+pod 'alpha-video-ffmpegkit', '1.0.0'
+```
+
+CocoaPods trunk is read-only from 2 December 2026, so later versions are used through the podspec at their tag: `pod 'alpha-video-ffmpegkit', :podspec => 'https://raw.githubusercontent.com/danielkpl2/alpha-video-ffmpegkit/v<version>/alpha-video-ffmpegkit.podspec'`. The module is `AlphaVideoFFmpegKit` either way.
+
+Both pull in [ffmpegkit-vp9](https://github.com/MediaCacheDev/ffmpegkit-vp9) 6.0.0 as dynamic XCFrameworks, which are embedded in the app.
 
 ```swift
 import AlphaVideoFFmpegKit
@@ -293,9 +301,11 @@ Both platforms use [ffmpegkit-vp9](https://github.com/MediaCacheDev/ffmpegkit-vp
 | Path | What | Package |
 |---|---|---|
 | `android/` | The Android library: the two views, `PlayerCallback`, source loading, the FFmpegKit pipes. Builds on its own (`./gradlew` in that folder) | `dev.mediacache:alpha-video-ffmpegkit` |
-| `ios/Sources/AlphaVideoFFmpegKit/` | The iOS library: the two views and source loading | SwiftPM `AlphaVideoFFmpegKit` (`Package.swift`) |
+| `ios/Sources/AlphaVideoFFmpegKit/` | The iOS library: the two views and source loading | SwiftPM `AlphaVideoFFmpegKit` (`Package.swift`), CocoaPods `alpha-video-ffmpegkit` (`alpha-video-ffmpegkit.podspec`) |
 | `react-native/` | `src/` (the components), `android/` (view managers; its Gradle module compiles `android/` too), `ios/` (subclasses of the iOS views with React props) | npm `react-native-alpha-video-ffmpegkit` (`package.json`, `react-native-alpha-video-ffmpegkit.podspec`) |
 | `scripts/publish-android.sh` | `local` publishes the Android library to `~/.m2`; `central` signs it and uploads it to the Maven Central Portal (see the script for the variables) | |
+
+A release is the tag `v<version>`: Swift Package Manager resolves it, and `alpha-video-ffmpegkit.podspec` fetches its sources from it. After pushing the tag, `pod trunk push alpha-video-ffmpegkit.podspec` (only while trunk accepts new versions).
 
 ## Requirements
 

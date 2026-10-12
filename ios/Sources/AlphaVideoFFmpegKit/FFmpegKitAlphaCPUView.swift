@@ -406,7 +406,8 @@ public class FFmpegKitAlphaCPUView: UIView {
         
         for _ in 0..<totalFrames {
             autoreleasepool {
-                if let data = try? fileHandle.readData(ofLength: frameSize), data.count == frameSize {
+                let data = fileHandle.readData(ofLength: frameSize)
+                if data.count == frameSize {
                     frames.append(data)
                 }
             }
