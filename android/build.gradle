@@ -55,6 +55,8 @@ dependencies {
     // FFmpegKit with a VP9-only FFmpeg (github.com/MediaCacheDev/ffmpegkit-vp9). Brings in
     // com.arthenica:smart-exception-java through its POM.
     implementation 'dev.mediacache:ffmpegkit-vp9:6.0.0'
+
+    testImplementation 'junit:junit:4.13.2'
 }
 
 if (project == rootProject) {
