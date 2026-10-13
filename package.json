@@ -15,13 +15,16 @@
     "THIRD_PARTY_NOTICES.md",
     "licenses",
     "!android/src/test",
+    "!ios/Tests",
     "!react-native/android/build",
     "!react-native/android/.gradle",
     "!ios/build",
     "!.DS_Store"
   ],
   "scripts": {
-    "publish:android:local": "scripts/publish-android.sh local"
+    "publish:android:local": "scripts/publish-android.sh local",
+    "test:android": "cd android && ./gradlew testReleaseUnitTest",
+    "test:ios": "scripts/test-ios.sh"
   },
   "codegenConfig": {
     "name": "RNFFmpegKitAlphaSpec",

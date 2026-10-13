@@ -324,6 +324,7 @@ Both platforms use [ffmpegkit-vp9](https://github.com/MediaCacheDev/ffmpegkit-vp
 | `android/` | The Android library: the two views, `PlayerCallback`, source loading, the FFmpegKit pipes. Builds on its own (`./gradlew` in that folder) | `dev.mediacache:alpha-video-ffmpegkit` |
 | `ios/Sources/AlphaVideoFFmpegKit/` | The iOS library: the two views and source loading | SwiftPM `AlphaVideoFFmpegKit` (`Package.swift`), CocoaPods `alpha-video-ffmpegkit` (`alpha-video-ffmpegkit.podspec`) |
 | `react-native/` | `src/` (the components), `android/` (view managers; its Gradle module compiles `android/` too), `ios/` (subclasses of the iOS views with React props) | npm `react-native-alpha-video-ffmpegkit` (`package.json`, `react-native-alpha-video-ffmpegkit.podspec`) |
+| `android/src/test/`, `ios/Tests/` | Unit tests (frame layout, colour matrix, playback clock, source loading): `npm run test:android` (JUnit) and `npm run test:ios` (XCTest on an iPhone simulator; `SIMULATOR_ID` picks one). Not in the npm package | |
 | `scripts/publish-android.sh` | `local` publishes the Android library to `~/.m2`; `central` signs it and uploads it to the Maven Central Portal (see the script for the variables) | |
 
 A release is the tag `v<version>`: Swift Package Manager resolves it, and `alpha-video-ffmpegkit.podspec` fetches its sources from it. After pushing the tag, `pod trunk push alpha-video-ffmpegkit.podspec` (only while trunk accepts new versions).

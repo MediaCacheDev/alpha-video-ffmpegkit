@@ -17,5 +17,10 @@ let package = Package(
             dependencies: [.product(name: "ffmpegkit-vp9", package: "ffmpegkit-vp9")],
             path: "ios/Sources/AlphaVideoFFmpegKit"
         ),
+        .testTarget(
+            name: "AlphaVideoFFmpegKitTests",
+            dependencies: ["AlphaVideoFFmpegKit"],
+            path: "ios/Tests/AlphaVideoFFmpegKitTests"
+        ),
     ]
 )
