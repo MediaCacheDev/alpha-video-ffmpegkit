@@ -1,5 +1,5 @@
 import React, { forwardRef, useImperativeHandle, useMemo, useRef } from 'react';
-import { Platform, View, StyleSheet, UIManager, findNodeHandle } from 'react-native';
+import { Platform, View, StyleSheet } from 'react-native';
 
 const CPU_VIEW = 'RNFFmpegKitAlphaCPUView';
 const GPU_VIEW = 'RNFFmpegKitAlphaGPUView';
@@ -12,8 +12,9 @@ if (Platform.OS === 'web') {
   // Web implementation using HTML5 video element
   WebView = require('./FFmpegKitAlphaView.web').default;
 } else {
-  nativeViews[CPU_VIEW] = require('./FFmpegKitAlphaCPUViewNativeComponent').default;
-  nativeViews[GPU_VIEW] = require('./FFmpegKitAlphaGPUViewNativeComponent').default;
+  // Codegen specs: Fabric components on the new architecture, view managers on the old one
+  nativeViews[CPU_VIEW] = require('./FFmpegKitAlphaCPUViewNativeComponent');
+  nativeViews[GPU_VIEW] = require('./FFmpegKitAlphaGPUViewNativeComponent');
 }
 
 function sourceUri(source) {
@@ -75,18 +76,14 @@ function createPlayer(displayName, pickNative) {
           seekToTime: (seconds) => nativeRef.current?.seekToTime(seconds),
         };
       }
-      const sendCommand = (name, args) => {
-        const handle = nativeRef.current ? findNodeHandle(nativeRef.current) : null;
-        if (!handle) return;
-        UIManager.dispatchViewManagerCommand(
-          handle,
-          UIManager.getViewManagerConfig(viewName)?.Commands?.[name] ?? name,
-          args,
-        );
-      };
+      const { Commands } = nativeViews[viewName];
       return {
-        seekToFrame: (frame) => sendCommand('seekToFrame', [frame]),
-        seekToTime: (seconds) => sendCommand('seekToTime', [seconds]),
+        seekToFrame: (frame) => {
+          if (nativeRef.current) Commands.seekToFrame(nativeRef.current, frame);
+        },
+        seekToTime: (seconds) => {
+          if (nativeRef.current) Commands.seekToTime(nativeRef.current, seconds);
+        },
       };
     }, [viewName]);
 
@@ -111,7 +108,7 @@ function createPlayer(displayName, pickNative) {
       return <View style={style} />;
     }
 
-    const NativeComponent = nativeViews[viewName];
+    const NativeComponent = nativeViews[viewName].default;
     return (
       <NativeComponent
         ref={nativeRef}

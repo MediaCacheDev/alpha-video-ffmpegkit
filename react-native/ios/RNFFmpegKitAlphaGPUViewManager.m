@@ -1,3 +1,6 @@
+// Old architecture only; the new one uses RNFFmpegKitAlphaGPUViewComponentView.mm
+#ifndef RCT_NEW_ARCH_ENABLED
+
 #import <React/RCTViewManager.h>
 
 @interface RCT_EXTERN_MODULE(RNFFmpegKitAlphaGPUViewManager, RCTViewManager)
@@ -18,3 +21,5 @@ RCT_EXTERN_METHOD(seekToFrame:(nonnull NSNumber *)reactTag frame:(nonnull NSNumb
 RCT_EXTERN_METHOD(seekToTime:(nonnull NSNumber *)reactTag seconds:(nonnull NSNumber *)seconds)
 
 @end
+
+#endif

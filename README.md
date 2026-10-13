@@ -41,6 +41,8 @@ On iOS the podspec depends on the `ffmpegkit-vp9` 6.0.0 pod from CocoaPods trunk
 
 On Android the library depends on `dev.mediacache:ffmpegkit-vp9:6.0.0` from Maven Central, the same minimal build with the `com.arthenica.ffmpegkit` API (FFmpegKit's own binaries are no longer published). It needs `minSdkVersion` 24.
 
+Both views work on both React Native architectures: the new one (Fabric, the default since 0.76) and the old one (`newArchEnabled=false`, up to 0.81). They are tested on 0.83, and on 0.81 with the new architecture turned off.
+
 ### Android without React Native
 
 ```gradle

@@ -24,7 +24,7 @@ Pod::Spec.new do |s|
   # Native views, which subclass its views
   s.source_files = [
     "ios/Sources/AlphaVideoFFmpegKit/**/*.swift",
-    "react-native/ios/**/*.{h,m,swift}"
+    "react-native/ios/**/*.{h,m,mm,swift}"
   ]
   s.public_header_files = "react-native/ios/RNFFmpegKitAlpha-Bridging-Header.h"
   s.swift_version = "5.0"
@@ -48,7 +48,6 @@ Pod::Spec.new do |s|
     "c++"
   ]
 
-  s.dependency "React-Core"
   # FFmpegKit with a VP9-only FFmpeg (github.com/MediaCacheDev/ffmpegkit-vp9). Dynamic frameworks
   # (LGPL: users can replace them), embedded in the app. 6.0.0 is the last version on CocoaPods
   # trunk, which is read-only from 2 December 2026.
@@ -59,4 +58,12 @@ Pod::Spec.new do |s|
     'CLANG_CXX_LANGUAGE_STANDARD' => 'c++17',
     'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386 armv7 armv7s'
   }
+
+  # React Native's helper: the Fabric and codegen dependencies, and RCT_NEW_ARCH_ENABLED on the
+  # new architecture. It reads pod_target_xcconfig, so it comes after it.
+  if respond_to?(:install_modules_dependencies, true)
+    install_modules_dependencies(s)
+  else
+    s.dependency "React-Core"
+  end
 end

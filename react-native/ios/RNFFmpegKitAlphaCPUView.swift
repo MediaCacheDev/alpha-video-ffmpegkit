@@ -1,5 +1,8 @@
 import UIKit
 
+// Old architecture only; the new one uses RNFFmpegKitAlphaCPUViewComponentView.mm
+#if !RCT_NEW_ARCH_ENABLED
+
 /// FFmpegKitAlphaCPUView with React props: the `{ uri, cacheKey? }` source, and the callbacks
 /// sent as direct events.
 @objc(RNFFmpegKitAlphaCPUView)
@@ -69,3 +72,5 @@ class RNFFmpegKitAlphaCPUViewManager: RCTViewManager {
         }
     }
 }
+
+#endif
