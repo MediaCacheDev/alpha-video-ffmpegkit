@@ -63,23 +63,22 @@ private func initializeMetalResources() -> Bool {
         texture2d<float> yTexture [[texture(0)]],
         texture2d<float> uTexture [[texture(1)]],
         texture2d<float> vTexture [[texture(2)]],
-        texture2d<float> aTexture [[texture(3)]]
+        texture2d<float> aTexture [[texture(3)]],
+        constant float4x4 &yuvToRgb [[buffer(0)]]
     ) {
         // CRITICAL: Use linear filtering for smooth rendering (not nearest)
         constexpr sampler textureSampler(mag_filter::linear, min_filter::linear);
 
-        float y = yTexture.sample(textureSampler, in.texCoord).r;
-        float u = uTexture.sample(textureSampler, in.texCoord).r - 0.5;
-        float v = vTexture.sample(textureSampler, in.texCoord).r - 0.5;
+        float4 yuv = float4(yTexture.sample(textureSampler, in.texCoord).r,
+                            uTexture.sample(textureSampler, in.texCoord).r,
+                            vTexture.sample(textureSampler, in.texCoord).r, 1.0);
         float a = aTexture.sample(textureSampler, in.texCoord).r;
 
-        // BT.601 YUV to RGB conversion (standard for web video)
-        float r = y + 1.402 * v;
-        float g = y - 0.344136 * u - 0.714136 * v;
-        float b = y + 1.772 * u;
+        // The clip's range and matrix (YuvToRgb)
+        float3 rgb = clamp((yuvToRgb * yuv).rgb, 0.0, 1.0);
 
         // Premultiply alpha for correct compositing
-        return float4(r * a, g * a, b * a, a);
+        return float4(rgb * a, a);
     }
     """
 
@@ -120,9 +119,10 @@ private class GPUTextureCache {
     let width: Int
     let height: Int
     let frameRate: Double
+    let yuvToRgb: [Float]
     
     init(yTextures: [MTLTexture], uTextures: [MTLTexture], vTextures: [MTLTexture], aTextures: [MTLTexture], 
-         width: Int, height: Int, frameRate: Double) {
+         width: Int, height: Int, frameRate: Double, yuvToRgb: [Float]) {
         self.yTextures = yTextures
         self.uTextures = uTextures
         self.vTextures = vTextures
@@ -131,13 +131,11 @@ private class GPUTextureCache {
         self.width = width
         self.height = height
         self.frameRate = frameRate
+        self.yuvToRgb = yuvToRgb
     }
     
     var gpuMemoryBytes: Int {
-        let ySize = width * height
-        let uvSize = (width / 2) * (height / 2)
-        let aSize = width * height
-        return (ySize + uvSize * 2 + aSize) * frameCount
+        YuvaLayout(width: width, height: height).frameSize * frameCount
     }
 }
 
@@ -237,6 +235,9 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
     // Video dimensions
     private var videoWidth: Int = 0
     private var videoHeight: Int = 0
+    /// Set by the probe on the decode queue; `yuvToRgb`, which draws read, is only set on main.
+    private var probedYuvToRgb = YuvToRgb.matrix(colorRange: nil, colorSpace: nil, width: 0, height: 0)
+    private var yuvToRgb = YuvToRgb.matrix(colorRange: nil, colorSpace: nil, width: 0, height: 0)
     /// 0 if the container doesn't say.
     private var durationSeconds: Double = 0
 
@@ -415,8 +416,7 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
                     throw WebMSourceError(message: "Could not read video size and frame rate")
                 }
                 self.log("Streaming: \(self.videoWidth)x\(self.videoHeight) @ \(self.frameRate)fps")
-                let uvSize = (self.videoWidth / 2) * (self.videoHeight / 2)
-                let frameSize = self.videoWidth * self.videoHeight * 2 + uvSize * 2
+                let frameSize = YuvaLayout(width: self.videoWidth, height: self.videoHeight).frameSize
                 let openStream = { [weak self] (startSeconds: Double) in
                     FrameStream(
                         path: filePath, outputOptions: "-f rawvideo -pix_fmt yuva420p",
@@ -447,6 +447,7 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
         frameStream = frames
         reopenStream = reopen
         streamTextures = textureSets
+        yuvToRgb = probedYuvToRgb
         nextStreamSet = 0
         currentStreamTextures = nil
         streamLoaded = false
@@ -457,11 +458,12 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
     }
 
     private func makeStreamTextures(device: MTLDevice) -> [PlaneTextures]? {
+        let layout = YuvaLayout(width: videoWidth, height: videoHeight)
         var sets: [PlaneTextures] = []
         for _ in 0..<Self.streamTextureSets {
             guard let y = createTexture(device: device, width: videoWidth, height: videoHeight),
-                  let u = createTexture(device: device, width: videoWidth / 2, height: videoHeight / 2),
-                  let v = createTexture(device: device, width: videoWidth / 2, height: videoHeight / 2),
+                  let u = createTexture(device: device, width: layout.uvWidth, height: layout.uvHeight),
+                  let v = createTexture(device: device, width: layout.uvWidth, height: layout.uvHeight),
                   let a = createTexture(device: device, width: videoWidth, height: videoHeight) else {
                 return nil
             }
@@ -514,19 +516,18 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
     }
 
     private func upload(_ frame: StreamFrame, into textures: PlaneTextures) {
-        let uvWidth = videoWidth / 2
-        let uvHeight = videoHeight / 2
-        let ySize = videoWidth * videoHeight
-        let uvSize = uvWidth * uvHeight
+        let layout = YuvaLayout(width: videoWidth, height: videoHeight)
+        let uvWidth = layout.uvWidth
+        let uvHeight = layout.uvHeight
         let base = UnsafeRawPointer(frame.bytes)
         textures.y.replace(region: MTLRegionMake2D(0, 0, videoWidth, videoHeight), mipmapLevel: 0,
                            withBytes: base, bytesPerRow: videoWidth)
         textures.u.replace(region: MTLRegionMake2D(0, 0, uvWidth, uvHeight), mipmapLevel: 0,
-                           withBytes: base + ySize, bytesPerRow: uvWidth)
+                           withBytes: base + layout.uOffset, bytesPerRow: uvWidth)
         textures.v.replace(region: MTLRegionMake2D(0, 0, uvWidth, uvHeight), mipmapLevel: 0,
-                           withBytes: base + ySize + uvSize, bytesPerRow: uvWidth)
+                           withBytes: base + layout.vOffset, bytesPerRow: uvWidth)
         textures.a.replace(region: MTLRegionMake2D(0, 0, videoWidth, videoHeight), mipmapLevel: 0,
-                           withBytes: base + ySize + uvSize * 2, bytesPerRow: videoWidth)
+                           withBytes: base + layout.aOffset, bytesPerRow: videoWidth)
     }
 
     private func closeStream() {
@@ -541,6 +542,7 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
     private func startPlaying(_ textures: GPUTextureCache) {
         currentTextureCache = textures
         frameRate = textures.frameRate
+        yuvToRgb = textures.yuvToRgb
         frameInterval = 1.0 / frameRate
         currentFrameIndex = 0
         isRunning = true
@@ -664,13 +666,10 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
             throw WebMSourceError(message: "FFmpeg decode failed: \(output.suffix(600))")
         }
 
-        // Calculate frame sizes for yuva420p
-        let ySize = videoWidth * videoHeight
-        let uvSize = (videoWidth / 2) * (videoHeight / 2)
-        let aSize = ySize
-        let frameSize = ySize + uvSize + uvSize + aSize
-        let uvWidth = videoWidth / 2
-        let uvHeight = videoHeight / 2
+        let layout = YuvaLayout(width: videoWidth, height: videoHeight)
+        let frameSize = layout.frameSize
+        let uvWidth = layout.uvWidth
+        let uvHeight = layout.uvHeight
 
         let fileSize = (try? FileManager.default.attributesOfItem(atPath: rawFile)[.size] as? Int) ?? 0
         let totalFrames = fileSize / frameSize
@@ -723,21 +722,21 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
                     uTex.replace(
                         region: MTLRegionMake2D(0, 0, uvWidth, uvHeight),
                         mipmapLevel: 0,
-                        withBytes: basePtr + ySize,
+                        withBytes: basePtr + layout.uOffset,
                         bytesPerRow: uvWidth
                     )
                     
                     vTex.replace(
                         region: MTLRegionMake2D(0, 0, uvWidth, uvHeight),
                         mipmapLevel: 0,
-                        withBytes: basePtr + ySize + uvSize,
+                        withBytes: basePtr + layout.vOffset,
                         bytesPerRow: uvWidth
                     )
                     
                     aTex.replace(
                         region: MTLRegionMake2D(0, 0, videoWidth, videoHeight),
                         mipmapLevel: 0,
-                        withBytes: basePtr + ySize + uvSize + uvSize,
+                        withBytes: basePtr + layout.aOffset,
                         bytesPerRow: videoWidth
                     )
                 }
@@ -761,7 +760,8 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
             aTextures: aTextures,
             width: videoWidth,
             height: videoHeight,
-            frameRate: frameRate
+            frameRate: frameRate,
+            yuvToRgb: probedYuvToRgb
         )
     }
 
@@ -820,6 +820,7 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
         encoder.setFragmentTexture(uTex, index: 1)
         encoder.setFragmentTexture(vTex, index: 2)
         encoder.setFragmentTexture(aTex, index: 3)
+        yuvToRgb.withUnsafeBytes { encoder.setFragmentBytes($0.baseAddress!, length: $0.count, index: 0) }
         
         encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)
         encoder.endEncoding()
@@ -848,6 +849,9 @@ public class FFmpegKitAlphaGPUView: UIView, MTKViewDelegate {
             if let codecType = stream["codec_type"] as? String, codecType == "video" {
                 videoWidth = stream["width"] as? Int ?? 0
                 videoHeight = stream["height"] as? Int ?? 0
+                probedYuvToRgb = YuvToRgb.matrix(
+                    colorRange: stream["color_range"] as? String, colorSpace: stream["color_space"] as? String,
+                    width: videoWidth, height: videoHeight)
 
                 frameRate = VideoProbe.frameRate(
                     average: stream["avg_frame_rate"] as? String, base: stream["r_frame_rate"] as? String)

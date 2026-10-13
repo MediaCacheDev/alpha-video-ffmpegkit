@@ -273,7 +273,8 @@ A 1080×1080 clip of 90 frames is about 400 MB as RGBA when preloaded; streamed 
 ## Supported Formats
 
 - **Container:** WebM, Matroska
-- **Video Codec:** VP9 with alpha channel (YUVA420P)
+- **Video Codec:** VP9 with alpha channel (YUVA420P). Files with the alpha in a separate track (dual-stream) play opaque; `react-native-alpha-video` plays those.
+- **Colour:** the GPU views use the clip's range and matrix tags (BT.601, BT.709, BT.2020). An untagged clip is taken as limited range, BT.601 up to 720x576 and BT.709 above.
 - **Sources:** see [Sources](#sources)
 
 ## Creating VP9+Alpha WebM Files

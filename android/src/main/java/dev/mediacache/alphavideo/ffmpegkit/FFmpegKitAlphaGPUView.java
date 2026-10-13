@@ -82,6 +82,8 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
     
     // GPU texture cache - all frames pre-uploaded to GPU
     private int[][] frameTextures; // [frameIndex][0=Y, 1=U, 2=V, 3=A]
+    private YuvaLayout layout;
+    private float[] yuvToRgb;
     
     private boolean hasLoggedFirstFrame = false;
     
@@ -103,17 +105,15 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
         "uniform sampler2D uTexture;\n" +
         "uniform sampler2D vTexture;\n" +
         "uniform sampler2D aTexture;\n" +
+        "uniform mat4 uYuvToRgb;\n" +
         "void main() {\n" +
-        "    float y = texture2D(yTexture, vTexCoord).r;\n" +
-        "    float u = texture2D(uTexture, vTexCoord).r - 0.5;\n" +
-        "    float v = texture2D(vTexture, vTexCoord).r - 0.5;\n" +
+        "    vec4 yuv = vec4(texture2D(yTexture, vTexCoord).r, texture2D(uTexture, vTexCoord).r,\n" +
+        "                    texture2D(vTexture, vTexCoord).r, 1.0);\n" +
         "    float a = texture2D(aTexture, vTexCoord).r;\n" +
-        "    // BT.601 YUV to RGB conversion (standard for web video)\n" +
-        "    float r = y + 1.402 * v;\n" +
-        "    float g = y - 0.344136 * u - 0.714136 * v;\n" +
-        "    float b = y + 1.772 * u;\n" +
+        "    // The clip's range and matrix (YuvToRgb)\n" +
+        "    vec3 rgb = clamp((uYuvToRgb * yuv).rgb, 0.0, 1.0);\n" +
         "    // Premultiply alpha for correct compositing\n" +
-        "    gl_FragColor = vec4(r * a, g * a, b * a, a);\n" +
+        "    gl_FragColor = vec4(rgb * a, a);\n" +
         "}\n";
     
     private static final float[] VERTEX_DATA = {
@@ -313,7 +313,10 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
         videoWidth = info.width;
         videoHeight = info.height;
         frameRate = info.frameRate;
-        logD("Video: " + videoWidth + "x" + videoHeight + " @ " + frameRate + "fps");
+        layout = new YuvaLayout(videoWidth, videoHeight);
+        yuvToRgb = YuvToRgb.matrix(info.colorRange, info.colorSpace, videoWidth, videoHeight);
+        logD("Video: " + videoWidth + "x" + videoHeight + " @ " + frameRate + "fps, colour "
+            + info.colorRange + " " + info.colorSpace);
         if (stopRequested()) return;
         
         SurfaceTexture surfaceTexture = getSurfaceTexture();
@@ -340,15 +343,10 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
                 return;
             }
             
-            int ySize = videoWidth * videoHeight;
-            int uvSize = (videoWidth / 2) * (videoHeight / 2);
-            int aSize = videoWidth * videoHeight;
-            int frameSize = ySize + uvSize + uvSize + aSize;
-            
             long fileSize = rawFile.length();
-            totalFrames = (int) (fileSize / frameSize);
+            totalFrames = (int) (fileSize / layout.frameSize);
             
-            double gpuMemoryMB = (double)(frameSize * totalFrames) / 1024.0 / 1024.0;
+            double gpuMemoryMB = (double) layout.frameSize * totalFrames / 1024.0 / 1024.0;
             logD(String.format("Uploading %d frames to GPU (%.2f MB GPU memory, 0 MB RAM)", 
                 totalFrames, gpuMemoryMB));
             
@@ -357,7 +355,7 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
                 return;
             }
             // Upload ALL frames to GPU textures first, then play with no per-frame upload
-            if (uploadAllFramesToGPU(rawFile, ySize, uvSize, aSize, frameSize)) {
+            if (uploadAllFramesToGPU(rawFile)) {
                 playFromGPUCache(playhead);
             }
             
@@ -494,9 +492,12 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
      * Upload ALL frames to GPU textures upfront.
      * After this, CPU frame data is discarded - playback is 100% GPU.
      */
-    private boolean uploadAllFramesToGPU(File rawFile, int ySize, int uvSize, int aSize, int frameSize) {
-        int uvWidth = videoWidth / 2;
-        int uvHeight = videoHeight / 2;
+    private boolean uploadAllFramesToGPU(File rawFile) {
+        int uvWidth = layout.uvWidth;
+        int uvHeight = layout.uvHeight;
+        int ySize = layout.ySize;
+        int uvSize = layout.uvSize;
+        int frameSize = layout.frameSize;
         
         // Allocate texture IDs for all frames (4 textures per frame: Y, U, V, A)
         frameTextures = new int[totalFrames][4];
@@ -505,7 +506,7 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
         ByteBuffer yBuffer = ByteBuffer.allocateDirect(ySize).order(ByteOrder.nativeOrder());
         ByteBuffer uBuffer = ByteBuffer.allocateDirect(uvSize).order(ByteOrder.nativeOrder());
         ByteBuffer vBuffer = ByteBuffer.allocateDirect(uvSize).order(ByteOrder.nativeOrder());
-        ByteBuffer aBuffer = ByteBuffer.allocateDirect(aSize).order(ByteOrder.nativeOrder());
+        ByteBuffer aBuffer = ByteBuffer.allocateDirect(ySize).order(ByteOrder.nativeOrder());
         
         GLES20.glPixelStorei(GLES20.GL_UNPACK_ALIGNMENT, 1);
         
@@ -540,7 +541,7 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
                 
                 // Upload U plane
                 uBuffer.clear();
-                uBuffer.put(frameBuffer, ySize, uvSize);
+                uBuffer.put(frameBuffer, layout.uOffset, uvSize);
                 uBuffer.position(0);
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texIds[1]);
                 GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
@@ -552,7 +553,7 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
                 
                 // Upload V plane
                 vBuffer.clear();
-                vBuffer.put(frameBuffer, ySize + uvSize, uvSize);
+                vBuffer.put(frameBuffer, layout.vOffset, uvSize);
                 vBuffer.position(0);
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texIds[2]);
                 GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
@@ -564,7 +565,7 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
                 
                 // Upload A plane
                 aBuffer.clear();
-                aBuffer.put(frameBuffer, ySize + uvSize + uvSize, aSize);
+                aBuffer.put(frameBuffer, layout.aOffset, ySize);
                 aBuffer.position(0);
                 GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texIds[3]);
                 GLES20.glTexParameteri(GLES20.GL_TEXTURE_2D, GLES20.GL_TEXTURE_MIN_FILTER, GLES20.GL_LINEAR);
@@ -602,11 +603,11 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
      * onLoad comes with the first frame, and totalFrames is estimated from the duration.
      */
     private void playStream(WebMSource local, String source, Playhead playhead) {
-        int uvWidth = videoWidth / 2;
-        int uvHeight = videoHeight / 2;
-        int ySize = videoWidth * videoHeight;
-        int uvSize = uvWidth * uvHeight;
-        int frameSize = ySize + uvSize + uvSize + ySize;
+        YuvaLayout layout = this.layout;
+        int uvWidth = layout.uvWidth;
+        int uvHeight = layout.uvHeight;
+        int ySize = layout.ySize;
+        int frameSize = layout.frameSize;
 
         int[] texIds = new int[4];
         GLES20.glGenTextures(4, texIds, 0);
@@ -625,9 +626,9 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
                     () -> loop, cancelled),
                 frame -> {
                     uploadPlane(texIds[0], planeBuffer, frame, 0, videoWidth, videoHeight);
-                    uploadPlane(texIds[1], planeBuffer, frame, ySize, uvWidth, uvHeight);
-                    uploadPlane(texIds[2], planeBuffer, frame, ySize + uvSize, uvWidth, uvHeight);
-                    uploadPlane(texIds[3], planeBuffer, frame, ySize + uvSize + uvSize, videoWidth, videoHeight);
+                    uploadPlane(texIds[1], planeBuffer, frame, layout.uOffset, uvWidth, uvHeight);
+                    uploadPlane(texIds[2], planeBuffer, frame, layout.vOffset, uvWidth, uvHeight);
+                    uploadPlane(texIds[3], planeBuffer, frame, layout.aOffset, videoWidth, videoHeight);
                     drawPlanes(texIds);
                 },
                 this::reportLoad, this::reportEnd);
@@ -698,6 +699,7 @@ public class FFmpegKitAlphaGPUView extends TextureView implements TextureView.Su
         GLES20.glActiveTexture(GLES20.GL_TEXTURE3);
         GLES20.glBindTexture(GLES20.GL_TEXTURE_2D, texIds[3]);
         GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "aTexture"), 3);
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(program, "uYuvToRgb"), 1, false, yuvToRgb, 0);
         
         int positionHandle = GLES20.glGetAttribLocation(program, "aPosition");
         GLES20.glEnableVertexAttribArray(positionHandle);

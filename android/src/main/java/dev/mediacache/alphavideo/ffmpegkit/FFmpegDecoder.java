@@ -30,12 +30,18 @@ final class FFmpegDecoder {
         final double frameRate;
         /** 0 if the container doesn't say. */
         final double durationSeconds;
+        /** FFprobe's names, e.g. {@code tv} and {@code bt709}; {@code unknown} if not tagged. */
+        final String colorRange;
+        final String colorSpace;
 
-        VideoInfo(int width, int height, double frameRate, double durationSeconds) {
+        VideoInfo(int width, int height, double frameRate, double durationSeconds,
+                  String colorRange, String colorSpace) {
             this.width = width;
             this.height = height;
             this.frameRate = frameRate;
             this.durationSeconds = durationSeconds;
+            this.colorRange = colorRange;
+            this.colorSpace = colorSpace;
         }
 
         /** Frame count from the duration, for stream mode, which reports onLoad before decoding the clip. */
@@ -48,7 +54,7 @@ final class FFmpegDecoder {
         try (FFmpegInput input = FFmpegInput.open(context, source)) {
             FFprobeSession session = FFprobeKit.execute(
                 "-v error -select_streams v:0"
-                    + " -show_entries stream=width,height,avg_frame_rate,r_frame_rate:format=duration"
+                    + " -show_entries stream=width,height,avg_frame_rate,r_frame_rate,color_range,color_space:format=duration"
                     + " -of default=noprint_wrappers=1 " + quote(input.argument()));
             if (!ReturnCode.isSuccess(session.getReturnCode())) {
                 throw new IOException("FFprobe failed: " + tail(session.getOutput()));
@@ -102,7 +108,8 @@ final class FFmpegDecoder {
         double frameRate = parseRate(values.get("avg_frame_rate"));
         if (frameRate <= 0) frameRate = parseRate(values.get("r_frame_rate"));
         if (frameRate <= 0) frameRate = DEFAULT_FRAME_RATE;
-        return new VideoInfo(width, height, frameRate, Math.max(0, parseDouble(values.get("duration"))));
+        return new VideoInfo(width, height, frameRate, Math.max(0, parseDouble(values.get("duration"))),
+            values.getOrDefault("color_range", "unknown"), values.getOrDefault("color_space", "unknown"));
     }
 
     /** {@code "30000/1001"} or {@code "30"}; 0 for {@code "0/0"}, "N/A" and anything else unusable. */
