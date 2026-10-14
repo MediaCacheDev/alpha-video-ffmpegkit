@@ -1,5 +1,7 @@
 # alpha-video-ffmpegkit
 
+> **For new apps, use [alpha-video](https://github.com/danielkpl2/alpha-video).** This package was the first attempt at transparent WebM, and it stays as a reference implementation. It's fully functional, streaming included, but alpha-video far surpasses it: hardware decoding on Android, AV1, playing while downloading, and one C++ decoder shared by every platform. See [the comparison](#compared-with-alpha-video).
+
 Plays VP9 WebM videos with an alpha channel (transparent video) on Android and iOS, decoding with [FFmpegKit](https://github.com/arthenica/ffmpeg-kit) from plain Java and Swift. It comes as a React Native component and as standalone Android and iOS libraries.
 
 | Platform | Package | Views |
@@ -10,14 +12,19 @@ Plays VP9 WebM videos with an alpha channel (transparent video) on Android and i
 
 By default clips are decoded while they play, a few frames ahead, so memory stays flat however long the clip is. `mode="preload"` decodes every frame first instead, which suits short clips that loop for a long time (see [Playback modes](#playback-modes)).
 
-This was the first attempt, and it stays as a reference implementation: the whole player is plain Java and Swift around FFmpeg command lines. For production, use [alpha-video](https://github.com/danielkpl2/alpha-video), which shares a C++ decoder between platforms:
+### Compared with alpha-video
+
+The whole player is plain Java and Swift around FFmpeg command lines, which makes it easy to read, and that's why it's kept. [alpha-video](https://github.com/danielkpl2/alpha-video) shares a C++ decoder between platforms instead:
 
 | | this package | alpha-video |
 |---|---|---|
-| Decoding | FFmpegKit command line, to raw frames | libvpx through FFmpeg's API, in process |
+| Files | VP9 with alpha (YUVA WebM) | YUVA WebM, and dual-stream VP9 or AV1 (8- to 12-bit) |
+| Decoding | FFmpegKit command line, to raw frames | libvpx or dav1d in process; on Android, MediaCodec in hardware where it can |
 | Playback | stream or preload | stream, preload or both |
 | http(s) sources | downloaded in full first | play while downloading (stream modes) |
 | FFmpeg licence | LGPL-3.0 (FFmpegKit builds with `--enable-version3`) | LGPL-2.1 |
+
+For transparent video with no video codec at all, see [alpha-video-gpu](https://github.com/danielkpl2/alpha-video-gpu), and the [demo app](#demo-and-related-packages) to compare them all.
 
 ## Features
 
@@ -32,9 +39,30 @@ This was the first attempt, and it stays as a reference implementation: the whol
 
 ### React Native
 
+**npm**, package `react-native-alpha-video-ffmpegkit`:
+
 ```bash
 npm install react-native-alpha-video-ffmpegkit
 cd ios && pod install
+```
+
+```tsx
+import { FFmpegKitAlphaView } from 'react-native-alpha-video-ffmpegkit';
+
+<FFmpegKitAlphaView
+  source={{ uri: 'https://example.com/video.webm', cacheKey: 'videos/intro.webm' }} // cacheKey: http(s) only
+  style={{ width: 200, height: 200 }}
+  useGPU={true}                // the default: draws with the GPU; false draws on the CPU
+  autoPlay={true}              // the default; false holds the first frame until it's set to true
+  loop={true}                  // the default; false plays once, then calls onEnd
+  paused={false}               // a hold; the clip carries on from its frame when unpaused
+  mode="stream"                // the default; 'preload' decodes every frame first
+  streamBufferFrames={15}      // stream: frames decoded ahead
+  verbose={false}              // true logs progress; errors always log
+  onLoad={({ totalFrames, width, height }) => console.log(totalFrames, width, height)}
+  onError={({ error }) => console.warn(error)}
+  onEnd={() => console.log('played once')}
+/>
 ```
 
 On iOS the podspec depends on the `ffmpegkit-vp9` 6.0.0 pod from CocoaPods trunk, a minimal FFmpegKit build. Its XCFrameworks are dynamic, and CocoaPods embeds them in the app.
@@ -43,7 +71,9 @@ On Android the library depends on `dev.mediacache:ffmpegkit-vp9:6.0.0` from Mave
 
 Both views work on both React Native architectures: the new one (Fabric, the default since 0.76) and the old one (`newArchEnabled=false`, up to 0.81). They are tested on 0.83, and on 0.81 with the new architecture turned off.
 
-### Android without React Native
+### Android
+
+**Maven Central**, artifact `dev.mediacache:alpha-video-ffmpegkit`:
 
 ```gradle
 dependencies {
@@ -54,57 +84,64 @@ dependencies {
 `FFmpegKitAlphaGPUView` (OpenGL ES) and `FFmpegKitAlphaCPUView` (Bitmap) are `TextureView`s in `dev.mediacache.alphavideo.ffmpegkit`. They take the same sources and options as the React Native component, through setters:
 
 ```kotlin
-val view = FFmpegKitAlphaGPUView(context)
-view.setMode("preload")
+val view = FFmpegKitAlphaGPUView(context)  // or FFmpegKitAlphaCPUView, which draws Bitmaps
+view.setCacheKey("videos/intro.webm")  // http(s) only: the cache file's name; default, a hash of the URL
+view.setAutoPlay(true)                 // the default; false holds the first frame until it's set to true
+view.setLoop(true)                     // the default; false plays once, then calls onEnd
+view.setPaused(false)                  // a hold; the clip carries on from its frame when unpaused
+view.setMode("stream")                 // the default; "preload" decodes every frame first
+view.setStreamBufferFrames(15)         // stream: frames decoded ahead
+view.setVerbose(false)                 // true logs progress to Logcat; errors always log
 view.setCallback(object : PlayerCallback {
     override fun onLoad(totalFrames: Int, width: Int, height: Int) {}
     override fun onError(error: String) {}
     override fun onEnd() {}
 })
-view.setSource("asset://videos/glow.webm")
+view.setSource("https://example.com/video.webm")
 container.addView(view)
 ```
 
-Playback starts once the view's surface exists. Detaching the view stops it, and attaching it again starts it over. Callbacks arrive on the main thread. http(s) sources need the `INTERNET` permission in the app's manifest. Needs `minSdk` 24.
+Playback starts once the view's surface exists. `setAutoPlay` and `setPaused` both take effect straight away: the clip plays while `autoPlay` is on and it isn't paused. Detaching the view stops it, and attaching it again starts it over. Callbacks arrive on the main thread. http(s) sources need the `INTERNET` permission in the app's manifest. Needs `minSdk` 24.
 
-### iOS without React Native
+### iOS
 
-In Xcode, add the package `https://github.com/danielkpl2/alpha-video-ffmpegkit` (File → Add Package Dependencies), or in `Package.swift`:
-
-```swift
-dependencies: [
-    .package(url: "https://github.com/danielkpl2/alpha-video-ffmpegkit", exact: "1.0.0"),
-],
-targets: [
-    .target(name: "MyApp", dependencies: [
-        .product(name: "AlphaVideoFFmpegKit", package: "alpha-video-ffmpegkit"),
-    ]),
-]
-```
-
-Or with CocoaPods:
+**CocoaPods**, pod `alpha-video-ffmpegkit`:
 
 ```ruby
 pod 'alpha-video-ffmpegkit', '1.0.0'
 ```
 
-CocoaPods trunk is read-only from 2 December 2026, so later versions are used through the podspec at their tag: `pod 'alpha-video-ffmpegkit', :podspec => 'https://raw.githubusercontent.com/danielkpl2/alpha-video-ffmpegkit/v<version>/alpha-video-ffmpegkit.podspec'`. The module is `AlphaVideoFFmpegKit` either way.
+**Swift Package Manager**, package `alpha-video-ffmpegkit`, product `AlphaVideoFFmpegKit`:
+
+```swift
+.package(url: "https://github.com/danielkpl2/alpha-video-ffmpegkit", from: "1.0.0")
+// in the target's dependencies:
+.product(name: "AlphaVideoFFmpegKit", package: "alpha-video-ffmpegkit")
+```
+
+The module is `AlphaVideoFFmpegKit` either way.
 
 Both pull in [ffmpegkit-vp9](https://github.com/MediaCacheDev/ffmpegkit-vp9) 6.0.0 as dynamic XCFrameworks, which are embedded in the app.
 
 ```swift
 import AlphaVideoFFmpegKit
 
-let view = FFmpegKitAlphaGPUView(frame: CGRect(x: 0, y: 0, width: 200, height: 200))
-view.mode = "preload"
+let view = FFmpegKitAlphaGPUView(frame: CGRect(x: 0, y: 0, width: 200, height: 200))  // or FFmpegKitAlphaCPUView
+view.cacheKey = "videos/intro.webm"    // http(s) only: the cache file's name; default, a hash of the URL
+view.autoPlay = true                   // the default; false holds the first frame until play()
+view.loop = true                       // the default; false plays once, then calls onEnd
+view.paused = false                    // a hold; the clip carries on from its frame when unpaused
+view.mode = "stream"                   // the default; "preload" decodes every frame first
+view.streamBufferFrames = 15           // stream: frames decoded ahead
+view.verbose = false                   // true logs progress to the Xcode console; errors always log
 view.onLoad = { totalFrames, width, height in }
 view.onError = { error in }
 view.onEnd = { }
-view.source = "asset://videos/glow.webm"
+view.source = "https://example.com/video.webm"
 container.addSubview(view)
 ```
 
-Playback starts on the next main-queue turn after `source` is set, so the other properties can be set before or after it. Closures are called on the main queue. `FFmpegKitAlphaCPUView` has the same properties. iOS 13 or later.
+Playback starts on the next main-queue turn after `source` is set, so the other properties can be set before or after it. Closures are called on the main queue. `FFmpegKitAlphaCPUView` has the same properties. A clip with `autoPlay` off starts with `play()`, or when `autoPlay` is set to `true`; the CPU view only has the latter. iOS 13 or later.
 
 ## Usage
 
@@ -116,10 +153,18 @@ import { FFmpegKitAlphaView } from 'react-native-alpha-video-ffmpegkit';
 function MyComponent() {
   return (
     <FFmpegKitAlphaView
-      source={{ uri: 'https://example.com/animation.webm' }}
+      source={{ uri: 'https://example.com/video.webm', cacheKey: 'videos/intro.webm' }} // cacheKey: http(s) only
       style={{ width: 200, height: 200 }}
+      useGPU={true}                // the default: draws with the GPU; false draws on the CPU
+      autoPlay={true}              // the default; false holds the first frame until it's set to true
+      loop={true}                  // the default; false plays once, then calls onEnd
+      paused={false}               // a hold; the clip carries on from its frame when unpaused
+      mode="stream"                // the default; 'preload' decodes every frame first
+      streamBufferFrames={15}      // stream: frames decoded ahead
+      verbose={false}              // true logs progress; errors always log
       onLoad={({ totalFrames, width, height }) => console.log(totalFrames, width, height)}
       onError={({ error }) => console.warn(error)}
+      onEnd={() => console.log('played once')}
     />
   );
 }
@@ -133,9 +178,18 @@ import { FFmpegKitAlphaView } from 'react-native-alpha-video-ffmpegkit';
 function MyComponent() {
   return (
     <FFmpegKitAlphaView
-      source={{ uri: 'https://example.com/animation.webm' }}
-      useGPU={false}
+      source={{ uri: 'https://example.com/video.webm', cacheKey: 'videos/intro.webm' }} // cacheKey: http(s) only
       style={{ width: 200, height: 200 }}
+      useGPU={false}               // draws on the CPU; the default, true, draws with the GPU
+      autoPlay={true}              // the default; false holds the first frame until it's set to true
+      loop={true}                  // the default; false plays once, then calls onEnd
+      paused={false}               // a hold; the clip carries on from its frame when unpaused
+      mode="stream"                // the default; 'preload' decodes every frame first
+      streamBufferFrames={15}      // stream: frames decoded ahead
+      verbose={false}              // true logs progress; errors always log
+      onLoad={({ totalFrames, width, height }) => console.log(totalFrames, width, height)}
+      onError={({ error }) => console.warn(error)}
+      onEnd={() => console.log('played once')}
     />
   );
 }
@@ -145,24 +199,32 @@ function MyComponent() {
 
 ```jsx
 import { FFmpegKitAlphaView } from 'react-native-alpha-video-ffmpegkit';
-import { useState } from 'react';
+import { useRef, useState } from 'react';
+import { Button } from 'react-native';
 
 function MyComponent() {
+  const player = useRef(null);
   const [paused, setPaused] = useState(false);
 
   return (
     <>
       <FFmpegKitAlphaView
-        source={{ uri: 'https://example.com/animation.webm' }}
-        autoPlay={true}
-        loop={true}
-        paused={paused}
+        ref={player}                 // seekToFrame(frame), seekToTime(seconds)
+        source={{ uri: 'https://example.com/video.webm', cacheKey: 'videos/intro.webm' }} // cacheKey: http(s) only
         style={{ width: 200, height: 200 }}
+        useGPU={true}                // the default: draws with the GPU; false draws on the CPU
+        autoPlay={true}              // the default; false holds the first frame until it's set to true
+        loop={true}                  // the default; false plays once, then calls onEnd
+        paused={paused}              // a hold; the clip carries on from its frame when unpaused
+        mode="stream"                // the default; 'preload' decodes every frame first
+        streamBufferFrames={15}      // stream: frames decoded ahead
+        verbose={false}              // true logs progress; errors always log
+        onLoad={({ totalFrames, width, height }) => console.log(totalFrames, width, height)}
+        onError={({ error }) => console.warn(error)}
+        onEnd={() => console.log('played once')}
       />
-      <Button 
-        title={paused ? "Play" : "Pause"} 
-        onPress={() => setPaused(!paused)} 
-      />
+      <Button title={paused ? 'Play' : 'Pause'} onPress={() => setPaused(!paused)} />
+      <Button title="Frame 45" onPress={() => player.current?.seekToFrame(45)} />
     </>
   );
 }
@@ -194,7 +256,7 @@ Anything else is reported through `onError`. Assets, `res/raw` and `content://` 
 
 For a `require()`d file, pass `Image.resolveAssetSource(require('./glow.webm')).uri`. In debug builds that's a Metro `http://localhost:8081` URL (downloaded like any other); in release builds it's a file path on iOS and a `res/raw` resource name on Android.
 
-Downloads only count as successful on HTTP 200. Without a `cacheKey` the file is named from a SHA-256 of the URL, so presigned URLs that change on every request download again. Give such sources a stable `cacheKey`: a file name relative to the app cache directory (`"animations/intro.webm"`) that must stay inside it. Apps that download files themselves (with their own cache) should pass the local path instead.
+Downloads only count as successful on HTTP 200. Without a `cacheKey` the file is named from a SHA-256 of the URL, so presigned URLs that change on every request download again. Give such sources a stable `cacheKey`: a file name relative to the app cache directory (`"videos/intro.webm"`) that must stay inside it. Apps that download files themselves (with their own cache) should pass the local path instead.
 
 ## Props
 
@@ -202,8 +264,8 @@ Downloads only count as successful on HTTP 200. Without a `cacheKey` the file is
 |------|------|---------|-------------|
 | `source` | `{ uri, cacheKey? }` \| `string` | required | See [Sources](#sources) |
 | `cacheKey` | `string` | - | Cache file name for downloads; overrides `source.cacheKey`. Also names the decoded-frame cache on iOS in preload mode. Ignored on web |
-| `autoPlay` | `boolean` | `true` | Start playing automatically. Off, the first frame shows and stays |
-| `loop` | `boolean` | `true` | Loop the animation |
+| `autoPlay` | `boolean` | `true` | Start playing automatically. Off, the first frame shows and stays until it's set to `true` |
+| `loop` | `boolean` | `true` | Loop the video |
 | `paused` | `boolean` | `false` | Hold the current frame; playback carries on from it when unpaused. A clip that starts paused still loads and shows its first frame |
 | `useGPU` | `boolean` | `true` | Use GPU acceleration (`FFmpegKitAlphaView` only) |
 | `mode` | `'stream'` \| `'preload'` | `'stream'` | See [Playback modes](#playback-modes). Changing it restarts playback. Ignored on web |
@@ -334,6 +396,15 @@ A release is the tag `v<version>`: Swift Package Manager resolves it, and `alpha
 - React Native 0.71+
 - Android: minSdkVersion 24; compileSdkVersion and targetSdkVersion come from the app (default 36)
 - iOS: iOS 13.0+
+
+## Demo and related packages
+
+[alpha-video-test](https://github.com/danielkpl2/alpha-video-test) is a React Native app (Android, iOS and web) that plays the same video in each of these formats side by side, this player included, with FPS, CPU and memory readouts.
+
+- [alpha-video](https://github.com/danielkpl2/alpha-video): the recommended WebM player. VP9 and AV1 with alpha, decoded by a shared C++ core, or in hardware by MediaCodec on Android.
+- [alpha-video-gpu](https://github.com/danielkpl2/alpha-video-gpu): ASTC texture arrays in KTX2, drawn without decoding. The lowest CPU and battery use.
+- [alpha-video-gpu-encoder](https://github.com/danielkpl2/alpha-video-gpu-encoder): makes the KTX2 files for alpha-video-gpu (`texenc`).
+- [react-native-apng-avif](https://github.com/danielkpl2/react-native-apng-avif): animated APNG and AVIF with alpha.
 
 ## License
 

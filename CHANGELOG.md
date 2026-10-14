@@ -13,5 +13,5 @@ First public release.
 - Sources: `https://` (downloaded once into the cache, under `cacheKey`), `file://`, absolute paths, `asset://` (Android assets, the iOS bundle, the web root), and on Android `content://` and `res/raw` names. Bundled and `content://` sources are piped to FFmpeg, so nothing is copied to disk.
 - Playback control: `seekToFrame` and `seekToTime`, plus `paused`, `autoPlay` and `loop`. Pausing holds the current frame. Events: `onLoad`, `onError` and `onEnd`.
 - React Native: `FFmpegKitAlphaView`, `FFmpegKitAlphaGPUView` and `FFmpegKitAlphaCPUView`, on both the new architecture (Fabric) and the old one. On react-native-web they render a `<video>`.
-- Standalone Android and iOS libraries with no React Native dependency.
+- Standalone Android and iOS libraries.
 - MIT, with FFmpegKit and FFmpeg under LGPL-3.0-or-later. Their notices are in `THIRD_PARTY_NOTICES.md`.
