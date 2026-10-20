@@ -22,7 +22,7 @@ The whole player is plain Java and Swift around FFmpeg command lines, which make
 | Decoding | FFmpegKit command line, to raw frames | libvpx or dav1d in process; on Android, MediaCodec in hardware where it can |
 | Playback | stream or preload | stream, preload or both |
 | http(s) sources | downloaded in full first | play while downloading (stream modes) |
-| Licences | FFmpegKit and FFmpeg, LGPL-3.0 (FFmpegKit builds with `--enable-version3`) | libvpx, dav1d and libwebm (BSD) on Android and iOS; FFmpeg's VP8 and VP9 decoders (LGPL-2.1) only in the web package |
+| Licences | MIT, with FFmpegKit and FFmpeg under LGPL-3.0 (FFmpegKit builds with `--enable-version3`) | MIT, with libvpx, dav1d and libwebm under BSD licences: no FFmpeg on Android or iOS |
 
 For transparent video with no video codec at all, see [alpha-video-gpu](https://github.com/MediaCacheDev/alpha-video-gpu), and the [demo app](#demo-and-related-packages) to compare them all.
 
