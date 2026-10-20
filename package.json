@@ -42,19 +42,28 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/danielkpl2/alpha-video-ffmpegkit"
+    "url": "https://github.com/MediaCacheDev/alpha-video-ffmpegkit"
   },
-  "homepage": "https://github.com/danielkpl2/alpha-video-ffmpegkit#readme",
+  "homepage": "https://github.com/MediaCacheDev/alpha-video-ffmpegkit#readme",
   "keywords": [
     "react-native",
     "alpha",
+    "alpha-channel",
     "transparent-video",
     "transparency",
     "webm",
     "vp9",
+    "yuva420p",
     "video",
+    "video-player",
     "ffmpeg",
     "ffmpegkit",
+    "libvpx",
+    "metal",
+    "opengl-es",
+    "react-native-component",
+    "fabric",
+    "react-native-web",
     "ios",
     "android"
   ],

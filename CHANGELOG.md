@@ -2,7 +2,7 @@
 
 The packages built from this repository share one version: `react-native-alpha-video-ffmpegkit` on npm, `dev.mediacache:alpha-video-ffmpegkit` on Maven Central, and the `AlphaVideoFFmpegKit` Swift package and `alpha-video-ffmpegkit` pod.
 
-## 1.0.0 - Unreleased
+## 1.0.0
 
 First public release.
 

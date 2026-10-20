@@ -8,7 +8,7 @@
 apply plugin: 'maven-publish'
 apply plugin: 'signing'
 
-def repoUrl = 'https://github.com/danielkpl2/alpha-video-ffmpegkit'
+def repoUrl = 'https://github.com/MediaCacheDev/alpha-video-ffmpegkit'
 
 afterEvaluate {
     publishing {

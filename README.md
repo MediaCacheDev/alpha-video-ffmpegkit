@@ -1,6 +1,6 @@
 # alpha-video-ffmpegkit
 
-> **For new apps, use [alpha-video](https://github.com/danielkpl2/alpha-video).** This package was the first attempt at transparent WebM, and it stays as a reference implementation. It's fully functional, streaming included, but alpha-video far surpasses it: hardware decoding on Android, AV1, playing while downloading, and one C++ decoder shared by every platform. See [the comparison](#compared-with-alpha-video).
+> **For new apps, use [alpha-video](https://github.com/MediaCacheDev/alpha-video).** This package was the first attempt at transparent WebM, and it stays as a reference implementation. It's fully functional, streaming included, but alpha-video far surpasses it: hardware decoding on Android, VP8 and AV1, playing while downloading, and one C++ decoder shared by every platform. See [the comparison](#compared-with-alpha-video).
 
 Plays VP9 WebM videos with an alpha channel (transparent video) on Android and iOS, decoding with [FFmpegKit](https://github.com/arthenica/ffmpeg-kit) from plain Java and Swift. It comes as a React Native component and as standalone Android and iOS libraries.
 
@@ -14,17 +14,17 @@ By default clips are decoded while they play, a few frames ahead, so memory stay
 
 ### Compared with alpha-video
 
-The whole player is plain Java and Swift around FFmpeg command lines, which makes it easy to read, and that's why it's kept. [alpha-video](https://github.com/danielkpl2/alpha-video) shares a C++ decoder between platforms instead:
+The whole player is plain Java and Swift around FFmpeg command lines, which makes it easy to read, and that's why it's kept. [alpha-video](https://github.com/MediaCacheDev/alpha-video) shares a C++ decoder between platforms instead:
 
 | | this package | alpha-video |
 |---|---|---|
-| Files | VP9 with alpha (YUVA WebM) | YUVA WebM, and dual-stream VP9 or AV1 (8- to 12-bit) |
+| Files | VP9 with alpha (YUVA WebM) | VP8 or VP9 with alpha (YUVA WebM), and dual-stream VP8, VP9 or AV1 (8- to 12-bit) |
 | Decoding | FFmpegKit command line, to raw frames | libvpx or dav1d in process; on Android, MediaCodec in hardware where it can |
 | Playback | stream or preload | stream, preload or both |
 | http(s) sources | downloaded in full first | play while downloading (stream modes) |
-| FFmpeg licence | LGPL-3.0 (FFmpegKit builds with `--enable-version3`) | LGPL-2.1 |
+| Licences | FFmpegKit and FFmpeg, LGPL-3.0 (FFmpegKit builds with `--enable-version3`) | libvpx, dav1d and libwebm (BSD) on Android and iOS; FFmpeg's VP8 and VP9 decoders (LGPL-2.1) only in the web package |
 
-For transparent video with no video codec at all, see [alpha-video-gpu](https://github.com/danielkpl2/alpha-video-gpu), and the [demo app](#demo-and-related-packages) to compare them all.
+For transparent video with no video codec at all, see [alpha-video-gpu](https://github.com/MediaCacheDev/alpha-video-gpu), and the [demo app](#demo-and-related-packages) to compare them all.
 
 ## Features
 
@@ -114,7 +114,7 @@ pod 'alpha-video-ffmpegkit', '1.0.0'
 **Swift Package Manager**, package `alpha-video-ffmpegkit`, product `AlphaVideoFFmpegKit`:
 
 ```swift
-.package(url: "https://github.com/danielkpl2/alpha-video-ffmpegkit", from: "1.0.0")
+.package(url: "https://github.com/MediaCacheDev/alpha-video-ffmpegkit", from: "1.0.0")
 // in the target's dependencies:
 .product(name: "AlphaVideoFFmpegKit", package: "alpha-video-ffmpegkit")
 ```
@@ -399,12 +399,13 @@ A release is the tag `v<version>`: Swift Package Manager resolves it, and `alpha
 
 ## Demo and related packages
 
-[alpha-video-test](https://github.com/danielkpl2/alpha-video-test) is a React Native app (Android, iOS and web) that plays the same video in each of these formats side by side, this player included, with FPS, CPU and memory readouts.
+[alpha-video-test](https://github.com/MediaCacheDev/alpha-video-test) is a React Native app (Android, iOS and web) that plays the same video in each of these formats side by side, this player included, with FPS, CPU and memory readouts.
 
-- [alpha-video](https://github.com/danielkpl2/alpha-video): the recommended WebM player. VP9 and AV1 with alpha, decoded by a shared C++ core, or in hardware by MediaCodec on Android.
-- [alpha-video-gpu](https://github.com/danielkpl2/alpha-video-gpu): ASTC texture arrays in KTX2, drawn without decoding. The lowest CPU and battery use.
-- [alpha-video-gpu-encoder](https://github.com/danielkpl2/alpha-video-gpu-encoder): makes the KTX2 files for alpha-video-gpu (`texenc`).
-- [react-native-apng-avif](https://github.com/danielkpl2/react-native-apng-avif): animated APNG and AVIF with alpha.
+- [alpha-video](https://github.com/MediaCacheDev/alpha-video): the recommended WebM player, with the smallest files. Standard alpha WebM in VP8 or VP9, and dual-stream WebM with colour and alpha as separate VP8, VP9 or AV1 tracks. MediaCodec in hardware on Android where it can, a C++ core with libvpx and dav1d on Android and iOS, and `<video>`, WebCodecs or WebAssembly on the web.
+- [alpha-video-gpu](https://github.com/MediaCacheDev/alpha-video-gpu): the highest performance. ASTC texture arrays in KTX2 go to the GPU as they are, with nothing to decode, so it uses the least CPU and battery and plays many clips at once. The files are larger than WebM. Android, iOS and web.
+- [alpha-video-gpu-encoder](https://github.com/MediaCacheDev/alpha-video-gpu-encoder): makes alpha-video-gpu's KTX2 files from video files or PNG sequences, encoding the frames to ASTC.
+- [react-native-apng-avif](https://github.com/MediaCacheDev/react-native-apng-avif): animated APNG and AVIF with alpha, for short clips.
+- [alpha-glow-button](https://github.com/MediaCacheDev/alpha-glow-button): buttons whose glow is a transparent video or animated image.
 
 ## License
 
