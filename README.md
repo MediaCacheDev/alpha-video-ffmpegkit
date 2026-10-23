@@ -1,5 +1,11 @@
 # alpha-video-ffmpegkit
 
+<p align="center">
+  <img src="docs/alpha-video-ffmpegkit.avif" alt="Transparent WebM videos playing over a checkerboard in the demo app on Android" width="360">
+  <br>
+  <a href="https://github.com/MediaCacheDev/alpha-video-test">Compare transparent formats in the demo app</a>
+</p>
+
 > **For new apps, use [alpha-video](https://github.com/MediaCacheDev/alpha-video).** This package was the first attempt at transparent WebM, and it stays as a reference implementation. It's fully functional, streaming included, but alpha-video far surpasses it: hardware decoding on Android, VP8 and AV1, playing while downloading, and one C++ decoder shared by every platform. See [the comparison](#compared-with-alpha-video).
 
 Plays VP9 WebM videos with an alpha channel (transparent video) on Android and iOS, decoding with [FFmpegKit](https://github.com/arthenica/ffmpeg-kit) from plain Java and Swift. It comes as a React Native component and as standalone Android and iOS libraries.
